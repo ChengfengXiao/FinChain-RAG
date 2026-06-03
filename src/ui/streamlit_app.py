@@ -11,6 +11,12 @@ sys.path.append(str(Path(__file__).resolve().parents[2]))
 API_URL = "http://localhost:8000/ask"
 
 
+def post_to_local_api(payload: dict) -> requests.Response:
+    session = requests.Session()
+    session.trust_env = False
+    return session.post(API_URL, json=payload, timeout=120)
+
+
 st.set_page_config(page_title="FinChain-RAG", layout="wide")
 
 st.title("FinChain-RAG A股产业链研究助手")
@@ -36,10 +42,8 @@ if st.button("生成分析", type="primary"):
     else:
         with st.spinner("正在检索本地知识库并生成研究结果..."):
             try:
-                response = requests.post(
-                    API_URL,
-                    json={"question": question, "top_k": top_k, "provider": provider, "model": model},
-                    timeout=120,
+                response = post_to_local_api(
+                    {"question": question, "top_k": top_k, "provider": provider, "model": model}
                 )
                 response.raise_for_status()
                 payload = response.json()

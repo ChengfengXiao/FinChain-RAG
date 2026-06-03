@@ -61,6 +61,20 @@ def embedding_model() -> str:
     return get_env("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small") or "text-embedding-3-small"
 
 
+def embedding_provider() -> str:
+    provider = (get_env("EMBEDDING_PROVIDER", "local") or "local").lower().strip()
+    if provider not in {"local", "openai"}:
+        raise RuntimeError("EMBEDDING_PROVIDER must be one of: local, openai.")
+    return provider
+
+
+def local_embedding_model() -> str:
+    return (
+        get_env("LOCAL_EMBEDDING_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+        or "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    )
+
+
 def chat_model() -> str:
     provider = llm_provider()
     defaults = {
@@ -77,7 +91,7 @@ def chat_model() -> str:
 
 
 def llm_provider() -> str:
-    provider = (get_env("LLM_PROVIDER", "openai") or "openai").lower().strip()
+    provider = (get_env("LLM_PROVIDER", "deepseek") or "deepseek").lower().strip()
     if provider not in {"openai", "deepseek", "minimax"}:
         raise RuntimeError("LLM_PROVIDER must be one of: openai, deepseek, minimax.")
     return provider

@@ -3,9 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import chromadb
-from openai import OpenAI
 
-from src.settings import chroma_db_dir, collection_name, embedding_model, require_openai_api_key
+from src.embeddings.embedding_client import EmbeddingClient
+from src.settings import chroma_db_dir, collection_name
 
 
 @dataclass
@@ -17,14 +17,12 @@ class RetrievedChunk:
 
 class ChromaRetriever:
     def __init__(self) -> None:
-        require_openai_api_key()
-        self.openai_client = OpenAI()
+        self.embedding_client = EmbeddingClient()
         self.chroma_client = chromadb.PersistentClient(path=chroma_db_dir())
         self.collection = self.chroma_client.get_or_create_collection(name=collection_name())
 
     def _embed_query(self, query: str) -> list[float]:
-        response = self.openai_client.embeddings.create(model=embedding_model(), input=query)
-        return response.data[0].embedding
+        return self.embedding_client.embed_query(query)
 
     def retrieve(self, query: str, top_k: int = 5) -> list[RetrievedChunk]:
         if not query.strip():
@@ -32,7 +30,7 @@ class ChromaRetriever:
 
         if self.collection.count() == 0:
             raise RuntimeError(
-                "Chroma collection is empty. Run `python src/ingestion/ingest.py` after configuring OPENAI_API_KEY."
+                "Chroma collection is empty. Run `python src/ingestion/ingest.py` first."
             )
 
         query_embedding = self._embed_query(query)

@@ -11,7 +11,7 @@ from src.agents.industry_chain_agent import IndustryChainAgent
 
 app = FastAPI(
     title="FinChain-RAG API",
-    description="A-share industry chain research assistant powered by RAG, ChromaDB and OpenAI.",
+    description="A-share industry chain research assistant powered by RAG, ChromaDB and configurable LLM providers.",
     version="0.1.0",
 )
 

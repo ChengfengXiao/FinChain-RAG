@@ -18,7 +18,7 @@ question = st.text_area(
     height=120,
 )
 top_k = st.slider("检索资料数量", min_value=3, max_value=10, value=5)
-provider = st.selectbox("生成模型供应商", options=["openai", "deepseek", "minimax"], index=0)
+provider = st.selectbox("生成模型供应商", options=["deepseek", "openai", "minimax"], index=0)
 default_models = {
     "openai": "gpt-4o-mini",
     "deepseek": "deepseek-v4-flash",

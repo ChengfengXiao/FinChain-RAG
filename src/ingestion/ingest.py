@@ -7,9 +7,9 @@ from pathlib import Path
 from typing import Iterable
 
 import chromadb
-from openai import OpenAI
 
-from src.settings import RAW_DOCS_DIR, chroma_db_dir, collection_name, embedding_model, require_openai_api_key
+from src.embeddings.embedding_client import EmbeddingClient
+from src.settings import RAW_DOCS_DIR, chroma_db_dir, collection_name
 
 
 THEME = "AI数据中心液冷"
@@ -47,19 +47,13 @@ def iter_source_files(raw_docs_dir: Path = RAW_DOCS_DIR) -> Iterable[Path]:
     )
 
 
-def embed_texts(client: OpenAI, texts: list[str]) -> list[list[float]]:
-    response = client.embeddings.create(model=embedding_model(), input=texts)
-    return [item.embedding for item in response.data]
-
-
 def build_chunk_id(source: str, chunk_index: int, chunk: str) -> str:
     digest = hashlib.sha1(f"{source}:{chunk_index}:{chunk}".encode("utf-8")).hexdigest()[:16]
     return f"{Path(source).stem}-{chunk_index}-{digest}"
 
 
 def ingest(chunk_size: int = 500, overlap: int = 80) -> int:
-    require_openai_api_key()
-    client = OpenAI()
+    embedding_client = EmbeddingClient()
     chroma_client = chromadb.PersistentClient(path=chroma_db_dir())
     collection = chroma_client.get_or_create_collection(name=collection_name())
 
@@ -78,7 +72,7 @@ def ingest(chunk_size: int = 500, overlap: int = 80) -> int:
     if not documents:
         raise RuntimeError(f"No .md or .txt documents found in {RAW_DOCS_DIR}")
 
-    embeddings = embed_texts(client, documents)
+    embeddings = embedding_client.embed_texts(documents)
     collection.upsert(ids=ids, documents=documents, metadatas=metadatas, embeddings=embeddings)
     return len(documents)
 
@@ -95,4 +89,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

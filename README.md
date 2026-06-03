@@ -7,7 +7,7 @@ FinChain-RAG 是一个基于 RAG、向量数据库和 LLM 的 A股产业链研�
 ## 功能特点
 
 - 本地知识库：内置 AI数据中心液冷产业链 markdown 资料。
-- 数据入库 pipeline：清洗文档、切分 chunks、调用 OpenAI embedding、写入 ChromaDB。
+- 数据入库 pipeline：清洗文档、切分 chunks、调用本地 embedding 模型、写入 ChromaDB。
 - RAG 检索：用户问题向量化后，从 ChromaDB 检索 top-k 相关片段。
 - 结构化公司数据：使用 `companies.jsonl` 管理 A股公司、产业链环节、相关逻辑、评分和风险提示。
 - 产业链 Agent：结合检索资料和公司结构化数据，生成初步投研报告。
@@ -40,9 +40,10 @@ Streamlit UI  ----HTTP---->  FastAPI /ask
                          |
         data/raw/liquid_cooling_docs/*.md
 
-OpenAI API:
-- text-embedding-3-small for embeddings
-- gpt-4o-mini / DeepSeek / MiniMax for report generation
+Model APIs:
+- local sentence-transformers model for embeddings by default
+- DeepSeek by default for report generation
+- OpenAI / MiniMax can be selected as optional Chat providers
 ```
 
 ## RAG 与向量数据库如何体现
@@ -51,11 +52,11 @@ OpenAI API:
 
 1. 文档入库：`src/ingestion/ingest.py` 读取 `data/raw/liquid_cooling_docs/` 下的 markdown 文档。
 2. 文本清洗与切分：脚本把行业资料清洗后切成 chunks，默认 `chunk_size=500`、`overlap=80`。
-3. 向量化：每个 chunk 调用 `OPENAI_EMBEDDING_MODEL`，默认 `text-embedding-3-small`，生成 embedding。
+3. 向量化：每个 chunk 使用本地 sentence-transformers 模型生成 embedding，默认 `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`。
 4. 向量数据库：chunk、metadata 和 embedding 写入本地 `chroma_db/`，使用 ChromaDB 持久化保存。
 5. 查询检索：`src/retriever/retriever.py` 将用户问题向量化，从 ChromaDB 检索 top-k 相关 chunks。
 6. 上下文增强：`src/agents/industry_chain_agent.py` 把检索 chunks 和 `companies.jsonl` 公司结构化数据一起放入 prompt。
-7. LLM生成：模型只基于检索资料和公司数据输出研究报告，并返回 `sources`。
+7. LLM生成：默认使用 DeepSeek，模型只基于检索资料和公司数据输出研究报告，并返回 `sources`。
 
 关键文件：
 
@@ -87,10 +88,14 @@ cp .env.example .env
 编辑 `.env`：
 
 ```bash
-OPENAI_API_KEY=sk-your-openai-api-key
-OPENAI_EMBEDDING_MODEL=text-embedding-3-small
-LLM_PROVIDER=openai
-OPENAI_CHAT_MODEL=gpt-4o-mini
+EMBEDDING_PROVIDER=local
+LOCAL_EMBEDDING_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+
+LLM_PROVIDER=deepseek
+DEEPSEEK_API_KEY=your-deepseek-api-key
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_CHAT_MODEL=deepseek-v4-flash
+
 CHROMA_DB_DIR=chroma_db
 CHROMA_COLLECTION_NAME=liquid_cooling_industry
 ```
@@ -105,7 +110,7 @@ CHROMA_COLLECTION_NAME=liquid_cooling_industry
 - `deepseek`
 - `minimax`
 
-注意：embedding 入库和检索默认仍使用 OpenAI embedding，所以 `OPENAI_API_KEY` 仍然必须配置。DeepSeek 和 MiniMax 只用于最终报告生成。
+注意：embedding 入库和检索默认使用本地 sentence-transformers 模型，不需要 OpenAI Key。第一次运行入库时会下载模型，可能需要等待几分钟。
 
 OpenAI：
 
@@ -166,7 +171,7 @@ python src/ingestion/ingest.py
 - `overlap=80`
 - metadata 包含 `source`、`chunk_index`、`theme`
 
-如未配置 `OPENAI_API_KEY`，脚本会给出清晰错误提示。
+默认使用本地 embedding，不需要配置 `OPENAI_API_KEY`。如果你把 `EMBEDDING_PROVIDER` 改为 `openai`，才需要配置 OpenAI Key。
 
 ## 启动 FastAPI 方法
 

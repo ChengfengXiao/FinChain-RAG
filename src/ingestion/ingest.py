@@ -3,10 +3,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import re
+import sys
 from pathlib import Path
 from typing import Iterable
 
 import chromadb
+
+sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from src.embeddings.embedding_client import EmbeddingClient
 from src.settings import RAW_DOCS_DIR, chroma_db_dir, collection_name

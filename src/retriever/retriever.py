@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import chromadb
+from chromadb.config import Settings
 
 from src.embeddings.embedding_client import EmbeddingClient
 from src.settings import chroma_db_dir, collection_name
@@ -18,7 +19,10 @@ class RetrievedChunk:
 class ChromaRetriever:
     def __init__(self) -> None:
         self.embedding_client = EmbeddingClient()
-        self.chroma_client = chromadb.PersistentClient(path=chroma_db_dir())
+        self.chroma_client = chromadb.PersistentClient(
+            path=chroma_db_dir(),
+            settings=Settings(anonymized_telemetry=False),
+        )
         self.collection = self.chroma_client.get_or_create_collection(name=collection_name())
 
     def _embed_query(self, query: str) -> list[float]:

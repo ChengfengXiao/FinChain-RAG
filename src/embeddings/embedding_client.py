@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 
 from openai import OpenAI
 from sentence_transformers import SentenceTransformer
 
 from src.settings import embedding_model, embedding_provider, local_embedding_model, require_openai_api_key
+
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 
 @lru_cache(maxsize=1)

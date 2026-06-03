@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Iterable
 
 import chromadb
+from chromadb.config import Settings
 
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
@@ -57,7 +58,10 @@ def build_chunk_id(source: str, chunk_index: int, chunk: str) -> str:
 
 def ingest(chunk_size: int = 500, overlap: int = 80) -> int:
     embedding_client = EmbeddingClient()
-    chroma_client = chromadb.PersistentClient(path=chroma_db_dir())
+    chroma_client = chromadb.PersistentClient(
+        path=chroma_db_dir(),
+        settings=Settings(anonymized_telemetry=False),
+    )
     collection = chroma_client.get_or_create_collection(name=collection_name())
 
     ids: list[str] = []

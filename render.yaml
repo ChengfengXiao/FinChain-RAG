@@ -2,7 +2,7 @@ services:
   - type: web
     name: finchain-rag-api
     runtime: python
-    plan: starter
+    plan: free
     buildCommand: pip install -r requirements.txt && python src/ingestion/ingest.py
     startCommand: uvicorn src.api.app:app --host 0.0.0.0 --port $PORT
     envVars:
@@ -26,7 +26,7 @@ services:
   - type: web
     name: finchain-rag-ui
     runtime: python
-    plan: starter
+    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: streamlit run src/ui/streamlit_app.py --server.address 0.0.0.0 --server.port $PORT
     envVars:

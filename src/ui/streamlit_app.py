@@ -233,7 +233,10 @@ st.markdown(
 )
 
 api_ok, api_message = check_api_health()
-st.success(api_message) if api_ok else st.error(api_message)
+if api_ok:
+    st.success(api_message)
+else:
+    st.error(api_message)
 
 with st.sidebar:
     st.header("模型设置")

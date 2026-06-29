@@ -239,11 +239,11 @@ def related_companies_for_target(target_code: str, companies: pd.DataFrame, limi
             continue
         row_layer = layer(str(row.get("segment", "")))
         if abs(row_layer - target_layer) <= 1:
-            relation = "同层/同主题"
+            relation = "同层/同主题公司线索"
             if row_layer < target_layer:
-                relation = "一层上游线索"
+                relation = "可能一层上游公司线索"
             elif row_layer > target_layer:
-                relation = "一层下游线索"
+                relation = "可能一层下游/销售方向公司线索"
             rows.append(
                 {
                     "company_name": row.get("company_name", ""),
@@ -251,11 +251,47 @@ def related_companies_for_target(target_code: str, companies: pd.DataFrame, limi
                     "segment": row.get("segment", ""),
                     "sub_segment": row.get("sub_segment", ""),
                     "relation": relation,
-                    "evidence": "companies.jsonl 结构化产业链映射，非已验证客户/供应商",
+                    "relation_quality": "industry_mapping_only",
+                    "evidence": "companies.jsonl 结构化产业链映射，非财报披露的已验证客户/供应商",
                     "leader_score": row.get("leader_score", 0),
                 }
             )
     return sorted(rows, key=lambda row: row.get("leader_score") or 0, reverse=True)[:limit]
+
+
+def format_yuan(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "未披露"
+    if abs(number) >= 100000000:
+        return f"{number / 100000000:.2f}亿元"
+    if abs(number) >= 10000:
+        return f"{number / 10000:.2f}万元"
+    return f"{number:.2f}元"
+
+
+def format_ratio(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "未披露"
+    return f"{number * 100:.2f}%"
+
+
+def format_mix_summary(rows: list[dict[str, Any]], amount_key: str, ratio_key: str) -> list[dict[str, Any]]:
+    summary = []
+    for row in rows[:6]:
+        summary.append(
+            {
+                "item_name": row.get("item_name") or "未命名项目",
+                "report_date": row.get("report_date") or "",
+                "amount": format_yuan(row.get(amount_key)),
+                "ratio": format_ratio(row.get(ratio_key)),
+                "gross_margin": format_ratio(row.get("gross_margin")),
+            }
+        )
+    return summary
 
 
 def build_relationship_graph(question: str, sources: list[AShareSource], company_rows: pd.DataFrame) -> dict[str, Any]:
@@ -279,27 +315,20 @@ def build_relationship_graph(question: str, sources: list[AShareSource], company
             continue
         name = item.get("name") or code
         company_id = f"company:{code}"
-        company_title = json.dumps({"code": code, "name": name, "metrics": item.get("metrics", {})}, ensure_ascii=False)
+        company_title = json.dumps(
+            {
+                "code": code,
+                "name": name,
+                "metrics": item.get("metrics", {}),
+                "business_model": item.get("business_model", {}),
+                "composition_date": item.get("composition_date", ""),
+                "revenue_mix": format_mix_summary(item.get("revenue_mix", []), "revenue_yuan", "revenue_ratio"),
+                "cost_mix": format_mix_summary(item.get("cost_mix", []), "cost_yuan", "cost_ratio"),
+                "note": "收入和成本来自主营构成，只作为财务构成说明；公开抓取数据未披露具体客户或供应商公司名时，不生成客户/供应商节点。",
+            },
+            ensure_ascii=False,
+        )
         add_node(company_id, f"{name}\n{code}", "company", company_title, 22)
-
-        for row in item.get("revenue_mix", [])[:5]:
-            label = row.get("item_name") or "收入来源"
-            node_id = f"revenue:{code}:{label}"
-            title = json.dumps(row, ensure_ascii=False)
-            add_node(node_id, f"收入\n{label}", "revenue", title, 16)
-            add_edge(company_id, node_id, f"收入来源 {row.get('revenue_ratio', 0):.1%}", "东财F10主营构成")
-
-        for row in item.get("cost_mix", [])[:5]:
-            label = row.get("item_name") or "成本去向"
-            node_id = f"cost:{code}:{label}"
-            title = json.dumps(row, ensure_ascii=False)
-            add_node(node_id, f"成本\n{label}", "cost", title, 16)
-            add_edge(node_id, company_id, f"成本构成 {row.get('cost_ratio', 0):.1%}", "东财F10主营构成；未等同具体供应商")
-
-        model = item.get("business_model", {})
-        model_id = f"model:{code}:{model.get('model', '不确定')}"
-        add_node(model_id, model.get("model", "ToB/ToC 不确定"), "model", json.dumps(model, ensure_ascii=False), 18)
-        add_edge(company_id, model_id, "业务对象", model.get("evidence", ""))
 
         for related in related_companies_for_target(code, company_rows):
             related_id = f"related:{related['ticker']}"
@@ -309,7 +338,13 @@ def build_relationship_graph(question: str, sources: list[AShareSource], company
             else:
                 add_edge(company_id, related_id, related["relation"], related["evidence"])
 
-    return {"nodes": list(nodes.values()), "edges": edges}
+    return {
+        "nodes": list(nodes.values()),
+        "edges": edges,
+        "counterparty_policy": "only_draw_disclosed_or_mapped_companies",
+        "disclosed_counterparties": [],
+        "note": "图谱只连公司节点。若公开财报/抓取数据未披露具体客户或供应商公司名，收入和成本只在主营构成里展示具体金额、占比、毛利率，不画成关系节点。",
+    }
 
 
 def current_run_date() -> str:

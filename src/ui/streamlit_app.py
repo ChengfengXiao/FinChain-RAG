@@ -1,14 +1,11 @@
 from __future__ import annotations
 
+from html import escape
 import os
-from pathlib import Path
-from tempfile import NamedTemporaryFile
 from typing import Any
 
 import requests
 import streamlit as st
-import streamlit.components.v1 as components
-from pyvis.network import Network
 
 
 API_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
@@ -65,6 +62,15 @@ def pct(value: Any) -> float:
         return 0.0
 
 
+def fmt_pct(value: Any) -> str:
+    if value in {"", None}:
+        return "-"
+    try:
+        return f"{float(value) * 100:.2f}%"
+    except (TypeError, ValueError):
+        return str(value)
+
+
 def card(label: str, value: str, sub: str = "") -> str:
     return f"""
     <div class="metric-card">
@@ -82,38 +88,62 @@ def render_graph(graph: dict[str, Any]) -> None:
         st.info("暂无关系图谱。通常是未识别到 A 股公司或公开接口失败。")
         return
 
-    colors = {
-        "company": "#1d4ed8",
-        "revenue": "#059669",
-        "cost": "#dc2626",
-        "model": "#7c3aed",
-        "related": "#64748b",
-    }
-    net = Network(
-        height="600px",
-        width="100%",
-        bgcolor="#ffffff",
-        font_color="#111827",
-        directed=True,
-        cdn_resources="in_line",
-    )
-    net.barnes_hut(gravity=-22000, central_gravity=0.22, spring_length=150, spring_strength=0.04, damping=0.18)
-    for node in nodes:
-        group = node.get("group", "related")
-        net.add_node(
-            node["id"],
-            label=node.get("label", node["id"]),
-            title=node.get("title", ""),
-            color=colors.get(group, "#64748b"),
-            value=node.get("value", 14),
-        )
-    for edge in edges:
-        net.add_edge(edge["from"], edge["to"], label=edge.get("label", ""), title=edge.get("title", ""), color="#94a3b8")
+    node_map = {node["id"]: node for node in nodes}
+    company_nodes = [node for node in nodes if node.get("group") == "company"]
+    target = company_nodes[0] if company_nodes else nodes[0]
+    target_id = target["id"]
 
-    with NamedTemporaryFile("w", suffix=".html", delete=False, encoding="utf-8") as tmp:
-        net.save_graph(tmp.name)
-        html = Path(tmp.name).read_text(encoding="utf-8")
-    components.html(html, height=630, scrolling=False)
+    upstream = []
+    downstream = []
+    peers = []
+    for edge in edges:
+        source = node_map.get(edge.get("from"))
+        target_node = node_map.get(edge.get("to"))
+        if not source or not target_node:
+            continue
+        if edge.get("to") == target_id:
+            upstream.append((source, edge))
+        elif edge.get("from") == target_id:
+            edge_label = edge.get("label", "")
+            if "同层" in edge_label or "同主题" in edge_label:
+                peers.append((target_node, edge))
+            else:
+                downstream.append((target_node, edge))
+
+    def company_card(node: dict[str, Any], edge: dict[str, Any] | None = None, kind: str = "peer") -> str:
+        label = escape(str(node.get("label", ""))).replace("\n", "<br/>")
+        edge_label = escape(str(edge.get("label", ""))) if edge else "目标公司"
+        title = escape(str(edge.get("title", ""))) if edge else "目标公司"
+        return f"""
+        <div class="graph-card {kind}">
+          <div class="graph-node-name">{label}</div>
+          <div class="graph-edge-label">{edge_label}</div>
+          <div class="graph-note">{title}</div>
+        </div>
+        """
+
+    def card_list(items: list[tuple[dict[str, Any], dict[str, Any]]], empty_text: str, kind: str) -> str:
+        if not items:
+            return f'<div class="graph-empty">{empty_text}</div>'
+        return "".join(company_card(node, edge, kind) for node, edge in items)
+
+    html = f"""
+    <div class="graph-wrap">
+      <div class="graph-lane">
+        <div class="graph-lane-title">可能一层上游公司线索</div>
+        {card_list(upstream, "公开抓取数据未披露具体供应商公司名；结构化映射中也没有可连的上游公司。", "upstream")}
+      </div>
+      <div class="graph-center">
+        {company_card(target, None, "target")}
+        <div class="graph-disclaimer">{escape(graph.get("note", "图谱只展示公司到公司的结构化线索。"))}</div>
+      </div>
+      <div class="graph-lane">
+        <div class="graph-lane-title">可能销售方向/同主题公司线索</div>
+        {card_list(downstream + peers, "公开抓取数据未披露具体客户公司名；结构化映射中也没有可连的销售方向公司。", "downstream")}
+      </div>
+    </div>
+    """
+    st.markdown(html, unsafe_allow_html=True)
 
 
 def render_composition(title: str, rows: list[dict[str, Any]], ratio_key: str, amount_key: str) -> None:
@@ -124,17 +154,22 @@ def render_composition(title: str, rows: list[dict[str, Any]], ratio_key: str, a
     blocks = []
     for row in rows:
         ratio = pct(row.get(ratio_key))
+        amount_label = fmt_number(row.get(amount_key))
+        ratio_label = fmt_pct(row.get(ratio_key))
+        gross_margin_label = fmt_pct(row.get("gross_margin"))
         blocks.append(
             f"""
             <div class="mix-row">
               <div class="mix-top">
-                <span class="mix-name">{row.get("item_name") or "-"}</span>
-                <span class="mix-ratio">{ratio:.1f}%</span>
+                <span class="mix-name">{escape(str(row.get("item_name") or "-"))}</span>
+                <span class="mix-ratio">{ratio_label}</span>
               </div>
               <div class="bar"><div class="bar-fill" style="width:{ratio:.1f}%"></div></div>
               <div class="mix-meta">
-                <span>{fmt_number(row.get(amount_key))}</span>
-                <span>毛利率 {(row.get("gross_margin") or 0) * 100:.1f}%</span>
+                <span>金额：{amount_label}</span>
+                <span>占比：{ratio_label}</span>
+                <span>毛利率：{gross_margin_label}</span>
+                <span>报告期：{escape(str(row.get("report_date") or "-"))}</span>
               </div>
             </div>
             """
@@ -171,6 +206,8 @@ def render_snapshot(snapshot: dict[str, Any]) -> None:
     if snapshot.get("business_scope"):
         with st.expander("主营范围，来自东财F10"):
             st.write(snapshot.get("business_scope"))
+
+    st.info("收入和成本来自东财F10主营构成。图谱只连公司；如果财报/公开抓取数据没有披露具体客户或供应商公司名，就不把收入、成本项目伪装成公司节点。")
 
     left, right = st.columns(2)
     with left:
@@ -214,10 +251,23 @@ st.markdown(
     .mix-ratio {font-weight:700; color:#0f766e;}
     .bar {height:8px; background:#e2e8f0; border-radius:999px; overflow:hidden; margin:10px 0 8px;}
     .bar-fill {height:100%; background:#0f766e; border-radius:999px;}
-    .mix-meta {display:flex; justify-content:space-between; color:#64748b; font-size:12px;}
+    .mix-meta {display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap; color:#64748b; font-size:12px;}
+    .graph-wrap {display:grid; grid-template-columns: 1fr 0.9fr 1fr; gap:14px; align-items:start; margin-top:10px;}
+    .graph-lane, .graph-center {border:1px solid #e5e7eb; border-radius:8px; background:#fff; padding:14px;}
+    .graph-center {background:#f8fafc;}
+    .graph-lane-title {font-size:13px; color:#64748b; margin-bottom:10px; font-weight:650;}
+    .graph-card {border:1px solid #e5e7eb; border-radius:8px; padding:12px; margin-bottom:10px; background:#fff;}
+    .graph-card.target {border-color:#1d4ed8; background:#eff6ff;}
+    .graph-card.upstream {border-left:4px solid #0f766e;}
+    .graph-card.downstream {border-left:4px solid #7c3aed;}
+    .graph-node-name {font-size:16px; font-weight:720; color:#0f172a; line-height:1.25;}
+    .graph-edge-label {font-size:13px; color:#334155; margin-top:8px; font-weight:650;}
+    .graph-note {font-size:12px; color:#64748b; margin-top:6px; line-height:1.45;}
+    .graph-empty {font-size:13px; color:#64748b; border:1px dashed #cbd5e1; border-radius:8px; padding:12px; background:#f8fafc;}
+    .graph-disclaimer {font-size:12px; color:#64748b; line-height:1.5; margin-top:10px;}
     .section-title {font-size:20px; font-weight:720; margin:18px 0 8px; color:#0f172a;}
     div[data-testid="stButton"] button {border-radius:8px; height:42px;}
-    @media (max-width: 900px) {.metric-grid {grid-template-columns: repeat(2, minmax(0, 1fr));}.info-strip {display:block;}}
+    @media (max-width: 900px) {.metric-grid {grid-template-columns: repeat(2, minmax(0, 1fr));}.info-strip {display:block;}.graph-wrap {grid-template-columns: 1fr;}}
     </style>
     """,
     unsafe_allow_html=True,
@@ -226,7 +276,7 @@ st.markdown(
     """
     <div class="hero">
       <div class="title">公司运营关系图谱</div>
-      <div class="subtitle">输入 A 股公司名或代码，查看收入来自哪里、成本花在哪里、业务更偏 ToB 还是 ToC，以及一层对应公司线索。</div>
+      <div class="subtitle">输入 A 股公司名或代码，查看收入构成、成本构成、ToB/ToC 判断，以及一层公司线索。图谱只连公司，不把收入或成本项目画成公司。</div>
     </div>
     """,
     unsafe_allow_html=True,

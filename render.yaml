@@ -1,0 +1,34 @@
+services:
+  - type: web
+    name: finchain-rag-api
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt && python src/ingestion/ingest.py
+    startCommand: uvicorn src.api.app:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: EMBEDDING_PROVIDER
+        value: local
+      - key: LOCAL_EMBEDDING_MODEL
+        value: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+      - key: LLM_PROVIDER
+        value: deepseek
+      - key: DEEPSEEK_BASE_URL
+        value: https://api.deepseek.com
+      - key: DEEPSEEK_CHAT_MODEL
+        value: deepseek-v4-flash
+      - key: CHROMA_DB_DIR
+        value: chroma_db
+      - key: CHROMA_COLLECTION_NAME
+        value: liquid_cooling_industry
+      - key: DEEPSEEK_API_KEY
+        sync: false
+
+  - type: web
+    name: finchain-rag-ui
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run src/ui/streamlit_app.py --server.address 0.0.0.0 --server.port $PORT
+    envVars:
+      - key: API_BASE_URL
+        sync: false

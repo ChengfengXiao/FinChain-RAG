@@ -1,72 +1,41 @@
-# FinChain-RAG: A-share Industry Chain Research Assistant
+# FinChain-RAG: A股公司运营关系图谱
 
-FinChain-RAG 是一个基于 RAG、向量数据库和 LLM 的 A股产业链研究助手。第一版聚焦“AI数据中心液冷产业链”，支持用户输入产业研究问题后，基于本地知识库检索资料，并输出产业链上下游拆解、A股公司映射、龙头公司排序、研究逻辑和引用来源。
+FinChain-RAG 现在收敛为一个更简单的公司研究工具：输入 A 股公司名或 6 位代码，系统抓取公开数据，生成公司运营情况分析和一层关系图谱。
 
-本项目定位是产业研究助手，不做股票价格预测，不提供买入、卖出或持有建议。
+项目不做荐股，不预测股价，不给买卖建议。所有收入、成本、行情、公告、新闻和资金流描述都必须基于抓取到的公开数据；数据不足时明确说明缺口。
 
-## 功能特点
+## 核心功能
 
-- 本地知识库：内置 AI数据中心液冷产业链 markdown 资料。
-- 数据入库 pipeline：清洗文档、切分 chunks、调用本地 embedding 模型、写入 ChromaDB。
-- RAG 检索：用户问题向量化后，从 ChromaDB 检索 top-k 相关片段。
-- 结构化公司数据：使用 `companies.jsonl` 管理 A股公司、产业链环节、相关逻辑、评分和风险提示。
-- 产业链 Agent：结合检索资料和公司结构化数据，生成初步投研报告。
-- FastAPI 后端：提供 `/ask` 问答接口。
-- Streamlit 前端：提供产业/公司搜索、运营快照、ER 关系图谱、AI 报告和数据源审计。
-- 明确引用来源：回答返回 `sources`，便于追溯本地知识库片段。
+- 公司搜索：支持公司名或 6 位 A 股代码，例如 `英维克`、`002837`、`宁德时代`。
+- 运营情况：展示行情、估值、行业、主营范围、主营构成、收入比例、成本比例和毛利率。
+- 一层关系图谱：只保留公司、收入来源、成本去向、ToB/ToC、对应公司。
+- 对应公司：来自 `companies.jsonl` 的结构化产业链映射，只作为一层上下游/同主题线索，不等同真实客户或供应商。
+- 数据源审计：展示腾讯行情、东财基本面、东财F10经营分析、东财资金流、东财新闻、巨潮公告等接口状态。
 
-## 技术架构图
+## 技术架构
 
 ```text
-User Question
+Streamlit UI
     |
     v
-Streamlit UI  ----HTTP---->  FastAPI /ask
-                                |
-                                v
-                       IndustryChainAgent
-                         |            |
-                         |            v
-                         |     companies.jsonl
-                         v
-                    ChromaRetriever
-                         |
-                         v
-                    ChromaDB Vector Store
-                         ^
-                         |
-              Ingestion Pipeline
-                         ^
-                         |
-        data/raw/liquid_cooling_docs/*.md
-
-Model APIs:
-- local sentence-transformers model for embeddings by default
-- DeepSeek by default for report generation
-- OpenAI / MiniMax can be selected as optional Chat providers
+FastAPI /ask
+    |
+    v
+AShareDataClient
+    |-- 腾讯行情/估值
+    |-- 东方财富个股基本面
+    |-- 东方财富F10经营分析/主营构成
+    |-- 东方财富概念/资金流/新闻
+    |-- 巨潮公告
+    |
+    v
+IndustryChainAgent
+    |-- 构造运营快照
+    |-- 构造一层收入/成本关系图谱
+    |-- 调用 DeepSeek/OpenAI/MiniMax 生成分析
 ```
 
-## RAG 与向量数据库如何体现
-
-本项目的 RAG 流程不是只把资料塞进 prompt，而是完整走了“入库、向量检索、上下文增强、LLM生成”：
-
-1. 文档入库：`src/ingestion/ingest.py` 读取 `data/raw/liquid_cooling_docs/` 下的 markdown 文档。
-2. 文本清洗与切分：脚本把行业资料清洗后切成 chunks，默认 `chunk_size=500`、`overlap=80`。
-3. 向量化：每个 chunk 使用本地 sentence-transformers 模型生成 embedding，默认 `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`。
-4. 向量数据库：chunk、metadata 和 embedding 写入本地 `chroma_db/`，使用 ChromaDB 持久化保存。
-5. 查询检索：`src/retriever/retriever.py` 将用户问题向量化，从 ChromaDB 检索 top-k 相关 chunks。
-6. 上下文增强：`src/agents/industry_chain_agent.py` 把检索 chunks 和 `companies.jsonl` 公司结构化数据一起放入 prompt。
-7. LLM生成：默认使用 DeepSeek，模型只基于检索资料和公司数据输出研究报告，并返回 `sources`。
-
-关键文件：
-
-- 向量入库：`src/ingestion/ingest.py`
-- 向量检索：`src/retriever/retriever.py`
-- RAG Agent：`src/agents/industry_chain_agent.py`
-- Prompt 模板：`src/prompts/report_prompt.py`
-- 向量库目录：`chroma_db/`
-
-## 安装方法
+## 安装
 
 ```bash
 cd finchain-rag
@@ -77,234 +46,106 @@ pip install -r requirements.txt
 
 要求 Python 3.10+。
 
-## .env 配置方法
+## 环境变量
 
-复制示例配置：
+复制配置：
 
 ```bash
 cp .env.example .env
 ```
 
-编辑 `.env`：
+最小配置：
 
 ```bash
-EMBEDDING_PROVIDER=local
-LOCAL_EMBEDDING_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
-
 LLM_PROVIDER=deepseek
 DEEPSEEK_API_KEY=your-deepseek-api-key
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 DEEPSEEK_CHAT_MODEL=deepseek-v4-flash
-
-CHROMA_DB_DIR=chroma_db
-CHROMA_COLLECTION_NAME=liquid_cooling_industry
 ```
 
 不要把真实 API Key 提交到 GitHub。
 
-### 多模型配置
+## 本地启动
 
-当前版本支持切换 3 个 Chat 模型供应商：
-
-- `openai`
-- `deepseek`
-- `minimax`
-
-注意：embedding 入库和检索默认使用本地 sentence-transformers 模型，不需要 OpenAI Key。第一次运行入库时会下载模型，可能需要等待几分钟。
-
-OpenAI：
+终端 1：启动后端。
 
 ```bash
-LLM_PROVIDER=openai
-OPENAI_API_KEY=sk-your-openai-api-key
-OPENAI_CHAT_MODEL=gpt-4o-mini
+cd /Users/chengfengxiao/Documents/向量数据库/finchain-rag
+source .venv/bin/activate
+uvicorn src.api.app:app --host 127.0.0.1 --port 8002
 ```
 
-DeepSeek：
+终端 2：启动前端。
 
 ```bash
-LLM_PROVIDER=deepseek
-DEEPSEEK_API_KEY=your-deepseek-api-key
-DEEPSEEK_BASE_URL=https://api.deepseek.com
-DEEPSEEK_CHAT_MODEL=deepseek-v4-flash
+cd /Users/chengfengxiao/Documents/向量数据库/finchain-rag
+source .venv/bin/activate
+API_BASE_URL=http://127.0.0.1:8002 streamlit run src/ui/streamlit_app.py
 ```
 
-MiniMax：
+打开：
 
-```bash
-LLM_PROVIDER=minimax
-MINIMAX_API_KEY=your-minimax-api-key
-MINIMAX_BASE_URL=https://api.minimax.io/v1
-MINIMAX_CHAT_MODEL=MiniMax-M3
+```text
+http://localhost:8501
 ```
 
-也可以在 Streamlit 页面里直接选择 `openai`、`deepseek` 或 `minimax`，并手动填写模型名。FastAPI `/ask` 也支持传入：
+注意：`8002` 是 API 后端，`8501` 是网页前端。
 
-```json
-{
-  "question": "请生成一份AI液冷产业链初步研究报告",
-  "provider": "deepseek",
-  "model": "deepseek-v4-flash",
-  "research_mode": "bottleneck_hunter",
-  "online_limit": 6,
-  "top_k": 5
-}
-```
-
-## 研究模式
-
-当前支持 4 种模式：
-
-| research_mode | 数据来源 | 适合场景 |
-| --- | --- | --- |
-| `local_rag` | 本地 markdown + Chroma + `companies.jsonl` | 使用内置液冷资料做可追溯 RAG 报告 |
-| `a_stock_online` | a-stock-data 在线接口 + `companies.jsonl` | 查个股行情、估值、公告、新闻、资金流和概念线索 |
-| `bottleneck_hunter` | a-stock-data 在线接口 + Bottleneck Hunter 框架 | 快速识别产业链卡点和优先验证方向 |
-| `serenity` | a-stock-data 在线接口 + Serenity 供应链研究框架 | 做更完整的产业链层级、公司排序和反方验证 |
-
-在线模式不需要先执行入库，也不依赖本地 markdown。它会自动从问题中识别 6 位股票代码或公司名；如果问题没有明确标的，会从 `companies.jsonl` 里按相关性选取最多 `online_limit` 个 A 股候选作为在线抓取对象。
-
-在线模式会额外返回：
-
-- `targets`：识别出的 A 股代码。
-- `operating_snapshots`：基于腾讯行情、东财基本面/概念/资金流、巨潮公告和东财新闻整理的公司运营快照。
-- `graph`：可视化 ER 关系图谱，节点包括搜索主题、公司、行业、概念、产业链环节、公告、新闻和资金流证据。
-
-图谱节点和公司运营情况只来自已抓取的公开数据字段；数据不足时会在报告和来源审计中标出，不用模型编造。
-
-## 本地 RAG 数据入库方法
-
-只有使用 `local_rag` 模式时才需要执行本节。
-
-项目已内置 5 篇 AI数据中心液冷产业链资料：
-
-- `data/raw/liquid_cooling_docs/01_why_liquid_cooling.md`
-- `data/raw/liquid_cooling_docs/02_upstream_components.md`
-- `data/raw/liquid_cooling_docs/03_midstream_systems.md`
-- `data/raw/liquid_cooling_docs/04_downstream_applications.md`
-- `data/raw/liquid_cooling_docs/05_ashare_companies.md`
-
-执行入库：
-
-```bash
-python src/ingestion/ingest.py
-```
-
-默认参数：
-
-- `chunk_size=500`
-- `overlap=80`
-- metadata 包含 `source`、`chunk_index`、`theme`
-
-默认使用本地 embedding，不需要配置 `OPENAI_API_KEY`。如果你把 `EMBEDDING_PROVIDER` 改为 `openai`，才需要配置 OpenAI Key。
-
-## 启动 FastAPI 方法
-
-```bash
-uvicorn src.api.app:app --reload
-```
-
-接口：
+## API 示例
 
 ```http
 POST /ask
 Content-Type: application/json
 
 {
-  "question": "用 bottleneck hunter 快速看 AI 液冷产业链卡在哪里",
+  "question": "英维克",
   "provider": "deepseek",
-  "model": "deepseek-v4-flash",
-  "research_mode": "bottleneck_hunter",
-  "online_limit": 6
+  "model": "deepseek-v4-flash"
 }
 ```
 
-响应：
+返回字段：
 
-```json
-{
-  "answer": "...",
-  "provider": "deepseek",
-  "model": "deepseek-v4-flash",
-  "research_mode": "bottleneck_hunter",
-  "sources": [
-    {
-      "source": "eastmoney_stock_info",
-      "code": "002837",
-      "title": "东财个股基本面",
-      "status": "ok"
-    }
-  ]
-}
-```
+- `answer`：AI 运营分析。
+- `targets`：识别到的 A 股代码。
+- `operating_snapshots`：公司运营快照。
+- `graph`：一层关系图谱节点和边。
+- `sources`：数据源审计。
 
-## 启动 Streamlit 方法
+## 图谱规则
 
-先启动 FastAPI，再运行：
+默认只分析 1 层关系：
+
+- 公司 -> 收入来源：来自东财F10主营构成的主营收入、收入比例、毛利率。
+- 成本去向 -> 公司：来自东财F10主营构成的主营成本和成本比例。
+- 公司 -> ToB/ToC：基于主营范围、主营构成、行业/概念文本做保守判断。
+- 公司 <-> 对应公司：来自结构化产业链映射，仅表示上下游/同主题线索。
+
+如果公开数据没有披露具体客户或供应商，系统会明确说明“未披露”，不会把产业链线索说成真实客户或供应商。
+
+## 示例输入
+
+- `英维克`
+- `002837`
+- `宁德时代`
+- `300750`
+
+## 部署到 Render
+
+项目已包含 `render.yaml`。在 Render 创建 Blueprint，选择 GitHub 仓库后填写：
 
 ```bash
-streamlit run src/ui/streamlit_app.py
+DEEPSEEK_API_KEY=你的 DeepSeek Key
 ```
 
-页面包含：
+前端服务的环境变量：
 
-- 标题：FinChain-RAG A股产业链研究助手
-- 产业或公司搜索框
-- 研究模式选择：本地 RAG、A股在线、Bottleneck Hunter、Serenity
-- DeepSeek/OpenAI/MiniMax 模型选择，默认 DeepSeek
-- 关系图谱：展示产业/公司/概念/公告/新闻/资金流关系
-- 运营情况：展示价格、估值、市值、资金流、公告和新闻
-- AI研究报告：基于已抓取数据生成初筛结论
-- 数据源审计：展示每个公开数据接口的抓取状态
-
-## 示例问题
-
-- AI数据中心为什么需要液冷？
-- 液冷产业链上游有哪些环节？
-- AI液冷相关的A股公司有哪些？
-- 帮我按照上游、中游、下游拆解液冷产业链
-- 哪些环节最可能卡住AI数据中心液冷发展？
-- 请生成一份AI液冷产业链初步研究报告
-
-## 示例输出
-
-更完整的示例见 `examples/liquid_cooling_report_example.md`。
-
-```markdown
-## 1. 核心结论
-
-AI服务器功率密度提升推动液冷从可选方案变成高密度算力部署的重要基础设施。产业机会集中在上游可靠零部件、中游CDU/冷板/液冷机柜，以及下游智算中心建设。
-
-## 2. 产业链拆解
-
-### 上游
-冷却液、泵、阀、管路、快接头、金属材料和密封件。
-
-### 中游
-CDU、冷板、manifold、液冷机柜和温控系统。
-
-### 下游
-AI服务器、IDC数据中心、云厂商和算力中心。
+```bash
+API_BASE_URL=https://你的-api服务地址
 ```
 
-## 项目亮点
-
-- 端到端 RAG 流程完整：从文档入库、向量检索到 LLM 生成均可本地运行。
-- 结合非结构化资料和结构化公司 JSONL，展示产业研究中常见的数据融合方式。
-- Prompt 单独管理，明确约束“不编造、不荐股、不预测股价”。
-- 回答返回引用来源，便于追溯知识库片段。
-- 后端和前端分离，适合作为简历项目继续扩展。
-
-## 后续可扩展方向
-
-- 增加更多产业主题，例如光模块、HBM、先进封装、机器人和电力设备。
-- 引入更严格的文档解析和清洗流程，支持 PDF、研报、公告和新闻。
-- 增加 rerank 模型，提高复杂问题下的检索质量。
-- 将公司数据扩展为财务指标、业务占比、客户验证阶段和订单进展。
-- 引入 Qdrant 或 Milvus，支持更大规模向量检索。
-- 增加 FastAPI 鉴权、任务队列、缓存和日志系统。
-- 增加前端图表，展示产业链环节、公司评分和来源覆盖情况。
+重新部署后访问 Streamlit 服务 URL 即可。
 
 ## 免责声明
 
-本项目仅用于技术展示和产业研究辅助，不构成任何投资建议。A股公司映射和评分来自本地模拟资料与结构化示例数据，不代表真实投资价值排序。
+本项目仅用于公开数据整理和公司运营研究辅助，不构成任何投资建议。公开接口可能存在延迟、缺失或临时失败，使用时应结合公司公告、年报、招股书和交易所披露文件复核。

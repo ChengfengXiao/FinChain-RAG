@@ -11,21 +11,21 @@ from src.agents.industry_chain_agent import IndustryChainAgent
 
 app = FastAPI(
     title="FinChain-RAG API",
-    description="A-share industry chain research assistant powered by RAG, ChromaDB and configurable LLM providers.",
+    description="A-share company operating analysis and one-hop relationship graph API.",
     version="0.1.0",
 )
 
 
 class AskRequest(BaseModel):
-    question: str = Field(..., min_length=1, description="用户产业链研究问题")
-    top_k: int = Field(default=5, ge=1, le=10, description="检索返回的 chunk 数量")
+    question: str = Field(..., min_length=1, description="公司名或 A 股代码")
+    top_k: int = Field(default=5, ge=1, le=10, description="保留字段，当前公司运营模式不使用")
     provider: str | None = Field(default=None, description="LLM provider: openai, deepseek, or minimax")
     model: str | None = Field(default=None, description="可选模型名；不填则使用 provider 默认模型")
     research_mode: str = Field(
-        default="local_rag",
-        description="local_rag, a_stock_online, bottleneck_hunter, or serenity",
+        default="company_ops",
+        description="固定为 company_ops：公司运营情况 + 一层收入/成本关系图谱",
     )
-    online_limit: int = Field(default=2, ge=1, le=6, description="在线模式最多抓取的 A 股标的数量")
+    online_limit: int = Field(default=1, ge=1, le=1, description="当前默认只分析 1 个公司")
 
 
 class AskResponse(BaseModel):

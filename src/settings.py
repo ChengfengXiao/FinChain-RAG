@@ -6,7 +6,6 @@ import os
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-RAW_DOCS_DIR = PROJECT_ROOT / "data" / "raw" / "liquid_cooling_docs"
 COMPANIES_PATH = PROJECT_ROOT / "data" / "processed" / "companies.jsonl"
 
 load_dotenv(PROJECT_ROOT / ".env")
@@ -14,16 +13,6 @@ load_dotenv(PROJECT_ROOT / ".env")
 
 def get_env(name: str, default: Optional[str] = None) -> Optional[str]:
     return os.getenv(name, default)
-
-
-def require_openai_api_key() -> str:
-    api_key = get_env("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "OPENAI_API_KEY is missing. Create a .env file from .env.example "
-            "and set OPENAI_API_KEY before running ingestion or question answering."
-        )
-    return api_key
 
 
 def require_provider_api_key(provider: str) -> str:
@@ -42,37 +31,6 @@ def require_provider_api_key(provider: str) -> str:
             f"{env_name} is missing. Set it in .env or switch LLM_PROVIDER to a configured provider."
         )
     return api_key
-
-
-def chroma_db_dir() -> str:
-    value = get_env("CHROMA_DB_DIR", "chroma_db") or "chroma_db"
-    path = Path(value)
-    if not path.is_absolute():
-        path = PROJECT_ROOT / path
-    path.mkdir(parents=True, exist_ok=True)
-    return str(path)
-
-
-def collection_name() -> str:
-    return get_env("CHROMA_COLLECTION_NAME", "liquid_cooling_industry") or "liquid_cooling_industry"
-
-
-def embedding_model() -> str:
-    return get_env("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small") or "text-embedding-3-small"
-
-
-def embedding_provider() -> str:
-    provider = (get_env("EMBEDDING_PROVIDER", "local") or "local").lower().strip()
-    if provider not in {"local", "openai"}:
-        raise RuntimeError("EMBEDDING_PROVIDER must be one of: local, openai.")
-    return provider
-
-
-def local_embedding_model() -> str:
-    return (
-        get_env("LOCAL_EMBEDDING_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
-        or "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-    )
 
 
 def chat_model() -> str:

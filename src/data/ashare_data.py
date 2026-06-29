@@ -114,6 +114,7 @@ class AShareDataClient:
             sources.extend(
                 [
                     self._safe_one(code, "eastmoney_stock_info", "东财个股基本面", lambda c=code: self.eastmoney_stock_info(c)),
+                    self._safe_one(code, "eastmoney_business_analysis", "东财F10经营分析/主营构成", lambda c=code: self.eastmoney_business_analysis(c)),
                     self._safe_one(code, "eastmoney_concept_blocks", "东财概念/行业板块", lambda c=code: self.eastmoney_concept_blocks(c)),
                     self._safe_one(code, "stock_fund_flow_120d", "东财120日资金流摘要", lambda c=code: self.fund_flow_summary(c)),
                     self._safe_one(
@@ -131,6 +132,16 @@ class AShareDataClient:
                 ]
             )
         return sources
+
+    def collect_company_ops(self, query: str, limit: int = 1) -> tuple[list[str], list[AShareSource]]:
+        codes = []
+        explicit = normalize_code(query)
+        if explicit:
+            codes = [explicit]
+            search_sources: list[AShareSource] = []
+        else:
+            codes, search_sources, _ = self.resolve_targets(query, limit=limit)
+        return codes[:limit], [*search_sources, *self.collect(codes[:limit])]
 
     def resolve_targets(self, query: str, limit: int = 4) -> tuple[list[str], list[AShareSource], dict[str, Any]]:
         """Resolve a user query into A-share stock codes using public Eastmoney search data."""
@@ -350,6 +361,51 @@ class AShareDataClient:
             "price_raw": data.get("f43", 0),
         }
 
+    def eastmoney_business_analysis(self, code: str) -> dict[str, Any]:
+        market = market_prefix(code).upper()
+        response = self.session.get(
+            "https://emweb.securities.eastmoney.com/PC_HSF10/BusinessAnalysis/PageAjax",
+            params={"code": f"{market}{code}"},
+            headers={"User-Agent": UA, "Referer": "https://emweb.securities.eastmoney.com/"},
+            timeout=10,
+        )
+        response.raise_for_status()
+        raw = response.json()
+        scope_rows = raw.get("zyfw") or []
+        composition_rows = raw.get("zygcfx") or []
+        review_rows = raw.get("jyps") or []
+        latest_date = ""
+        for row in composition_rows:
+            date = str(row.get("REPORT_DATE", ""))[:10]
+            if date > latest_date:
+                latest_date = date
+
+        rows = []
+        for row in composition_rows:
+            if latest_date and str(row.get("REPORT_DATE", ""))[:10] != latest_date:
+                continue
+            rows.append(
+                {
+                    "report_date": str(row.get("REPORT_DATE", ""))[:10],
+                    "type": _mainop_type_name(str(row.get("MAINOP_TYPE", ""))),
+                    "item_name": row.get("ITEM_NAME", ""),
+                    "revenue_yuan": _to_float(row.get("MAIN_BUSINESS_INCOME")),
+                    "revenue_ratio": _to_float(row.get("MBI_RATIO")),
+                    "cost_yuan": _to_float(row.get("MAIN_BUSINESS_COST")),
+                    "cost_ratio": _to_float(row.get("MBC_RATIO")),
+                    "profit_yuan": _to_float(row.get("MAIN_BUSINESS_RPOFIT")),
+                    "profit_ratio": _to_float(row.get("MBR_RATIO")),
+                    "gross_margin": _to_float(row.get("GROSS_RPOFIT_RATIO")),
+                }
+            )
+
+        return {
+            "business_scope": (scope_rows[0].get("BUSINESS_SCOPE", "") if scope_rows else ""),
+            "business_review": _strip_html(review_rows[0].get("BUSINESS_REVIEW", ""))[:1200] if review_rows else "",
+            "latest_report_date": latest_date,
+            "composition": rows,
+        }
+
     def eastmoney_concept_blocks(self, code: str) -> dict[str, Any]:
         params = {
             "fltt": "2",
@@ -532,6 +588,10 @@ def _to_float(value: Any) -> float:
 
 def _strip_html(value: str) -> str:
     return re.sub(r"<[^>]+>", "", value or "")
+
+
+def _mainop_type_name(value: str) -> str:
+    return {"1": "按产品", "2": "按行业", "3": "按地区"}.get(value, value or "未知")
 
 
 def _cninfo_ts_to_date(value: Any) -> str:

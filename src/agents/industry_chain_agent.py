@@ -2,27 +2,17 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 import pandas as pd
 from src.data.ashare_data import AShareDataClient, AShareSource, normalize_code
 from src.prompts.report_prompt import (
-    ONLINE_RESEARCH_SYSTEM_PROMPT,
-    REPORT_SYSTEM_PROMPT,
-    build_online_research_prompt,
-    build_report_prompt,
+    COMPANY_OPS_SYSTEM_PROMPT,
+    build_company_ops_prompt,
 )
 from src.settings import COMPANIES_PATH
 from src.llm.providers import create_chat_client, resolve_chat_config
-
-
-@dataclass
-class RetrievedChunkLike:
-    document: str
-    metadata: dict
-    distance: float | None = None
 
 
 def load_companies() -> pd.DataFrame:
@@ -55,17 +45,6 @@ def filter_companies(question: str, companies: pd.DataFrame, limit: int = 12) ->
     filtered = companies[scores > 0] if (scores > 0).any() else companies
     filtered = filtered.assign(_match_score=scores.loc[filtered.index])
     return filtered.sort_values(["_match_score", "leader_score"], ascending=[False, False]).drop(columns=["_match_score"]).head(limit)
-
-
-def format_retrieved_context(chunks: list[RetrievedChunkLike]) -> str:
-    if not chunks:
-        return "未检索到相关资料。"
-    lines = []
-    for idx, chunk in enumerate(chunks, start=1):
-        source = chunk.metadata.get("source", "unknown")
-        chunk_index = chunk.metadata.get("chunk_index", "unknown")
-        lines.append(f"[{idx}] source={source}, chunk_index={chunk_index}\n{chunk.document}")
-    return "\n\n".join(lines)
 
 
 def format_company_context(companies: pd.DataFrame) -> str:
@@ -140,7 +119,23 @@ def build_operating_snapshots(sources: list[AShareSource]) -> list[dict[str, Any
     for source in sources:
         if source.status != "ok" or not source.code:
             continue
-        item = grouped.setdefault(source.code, {"code": source.code, "name": "", "metrics": {}, "concepts": [], "announcements": [], "news": []})
+        item = grouped.setdefault(
+            source.code,
+            {
+                "code": source.code,
+                "name": "",
+                "metrics": {},
+                "business_scope": "",
+                "business_review": "",
+                "composition_date": "",
+                "revenue_mix": [],
+                "cost_mix": [],
+                "business_model": {},
+                "concepts": [],
+                "announcements": [],
+                "news": [],
+            },
+        )
         data = source.data
         if source.source == "tencent_quote" and isinstance(data, dict):
             item["name"] = data.get("name") or item["name"]
@@ -164,6 +159,28 @@ def build_operating_snapshots(sources: list[AShareSource]) -> list[dict[str, Any
                     "float_mcap_yuan": data.get("float_mcap_yuan"),
                 }
             )
+        elif source.source == "eastmoney_business_analysis" and isinstance(data, dict):
+            composition = data.get("composition", [])
+            product_rows = [row for row in composition if row.get("type") == "按产品"]
+            revenue_mix = sorted(product_rows or composition, key=lambda row: row.get("revenue_ratio") or 0, reverse=True)[:6]
+            cost_mix = sorted(product_rows or composition, key=lambda row: row.get("cost_ratio") or 0, reverse=True)[:6]
+            evidence_text = " ".join(
+                [
+                    data.get("business_scope", ""),
+                    " ".join(str(row.get("item_name", "")) for row in revenue_mix),
+                    item["metrics"].get("industry", "") or "",
+                ]
+            )
+            item.update(
+                {
+                    "business_scope": data.get("business_scope", ""),
+                    "business_review": data.get("business_review", ""),
+                    "composition_date": data.get("latest_report_date", ""),
+                    "revenue_mix": revenue_mix,
+                    "cost_mix": cost_mix,
+                    "business_model": infer_business_model(evidence_text),
+                }
+            )
         elif source.source == "eastmoney_concept_blocks" and isinstance(data, dict):
             item["concepts"] = data.get("concept_tags", [])[:12]
         elif source.source == "stock_fund_flow_120d" and isinstance(data, dict):
@@ -182,6 +199,65 @@ def build_operating_snapshots(sources: list[AShareSource]) -> list[dict[str, Any
     return list(grouped.values())
 
 
+def infer_business_model(text: str) -> dict[str, str]:
+    to_b_keywords = ["设备", "工业", "数据中心", "机房", "通信", "客户", "工程", "系统", "企业", "电力", "汽车", "能源", "服务器"]
+    to_c_keywords = ["消费者", "零售", "门店", "个人", "食品", "饮料", "服装", "家居", "旅游", "游戏", "会员"]
+    b_hits = [word for word in to_b_keywords if word in text]
+    c_hits = [word for word in to_c_keywords if word in text]
+    if b_hits and not c_hits:
+        return {"model": "ToB", "evidence": "、".join(b_hits[:5]), "confidence": "中"}
+    if c_hits and not b_hits:
+        return {"model": "ToC", "evidence": "、".join(c_hits[:5]), "confidence": "中"}
+    if b_hits and c_hits:
+        return {"model": "ToB/ToC 混合", "evidence": "、".join((b_hits + c_hits)[:6]), "confidence": "低"}
+    return {"model": "不确定", "evidence": "主营范围和主营构成未提供足够业务对象线索", "confidence": "低"}
+
+
+def related_companies_for_target(target_code: str, companies: pd.DataFrame, limit: int = 8) -> list[dict[str, Any]]:
+    if companies.empty:
+        return []
+    target = companies[companies["ticker"].astype(str) == str(target_code)]
+    if target.empty:
+        return []
+
+    target_segment = str(target.iloc[0].get("segment", ""))
+
+    def layer(segment: str) -> int:
+        if "上游" in segment:
+            return 1
+        if "中游" in segment:
+            return 2
+        if "下游" in segment:
+            return 3
+        return 2
+
+    target_layer = layer(target_segment)
+    rows = []
+    for _, row in companies.iterrows():
+        code = str(row.get("ticker", ""))
+        if code == str(target_code):
+            continue
+        row_layer = layer(str(row.get("segment", "")))
+        if abs(row_layer - target_layer) <= 1:
+            relation = "同层/同主题"
+            if row_layer < target_layer:
+                relation = "一层上游线索"
+            elif row_layer > target_layer:
+                relation = "一层下游线索"
+            rows.append(
+                {
+                    "company_name": row.get("company_name", ""),
+                    "ticker": code,
+                    "segment": row.get("segment", ""),
+                    "sub_segment": row.get("sub_segment", ""),
+                    "relation": relation,
+                    "evidence": "companies.jsonl 结构化产业链映射，非已验证客户/供应商",
+                    "leader_score": row.get("leader_score", 0),
+                }
+            )
+    return sorted(rows, key=lambda row: row.get("leader_score") or 0, reverse=True)[:limit]
+
+
 def build_relationship_graph(question: str, sources: list[AShareSource], company_rows: pd.DataFrame) -> dict[str, Any]:
     nodes: dict[str, dict[str, Any]] = {}
     edges: list[dict[str, Any]] = []
@@ -196,72 +272,42 @@ def build_relationship_graph(question: str, sources: list[AShareSource], company
             if edge not in edges:
                 edges.append(edge)
 
-    query_id = "query"
-    add_node(query_id, question[:28] + ("..." if len(question) > 28 else ""), "query", question, 26)
-
-    company_lookup = {
-        str(row.get("ticker", "")): {
-            "name": str(row.get("company_name", "")),
-            "segment": str(row.get("segment", "")),
-            "sub_segment": str(row.get("sub_segment", "")),
-            "leader_score": row.get("leader_score", ""),
-        }
-        for _, row in company_rows.iterrows()
-    }
-
-    search_blocks: list[dict[str, Any]] = []
-    for source in sources:
-        if source.source == "eastmoney_search" and isinstance(source.data, dict):
-            search_blocks.extend(source.data.get("selected_blocks", []))
-
-    for block in search_blocks[:3]:
-        block_id = f"block:{block.get('code')}"
-        add_node(block_id, block.get("name", block.get("code", "板块")), "industry", json.dumps(block, ensure_ascii=False), 24)
-        add_edge(query_id, block_id, "匹配板块", "来自东财关键词搜索")
-
     snapshots = build_operating_snapshots(sources)
     for item in snapshots:
         code = item["code"]
-        name = item.get("name") or company_lookup.get(code, {}).get("name") or code
+        if not code:
+            continue
+        name = item.get("name") or code
         company_id = f"company:{code}"
-        metrics = item.get("metrics", {})
-        company_title = json.dumps({"code": code, "name": name, "metrics": metrics}, ensure_ascii=False)
+        company_title = json.dumps({"code": code, "name": name, "metrics": item.get("metrics", {})}, ensure_ascii=False)
         add_node(company_id, f"{name}\n{code}", "company", company_title, 22)
-        add_edge(query_id, company_id, "检索标的", "由代码、公司名或板块成分映射")
 
-        if code in company_lookup:
-            segment = company_lookup[code]["segment"]
-            sub_segment = company_lookup[code]["sub_segment"]
-            segment_id = f"segment:{segment}"
-            add_node(segment_id, segment, "segment", sub_segment, 18)
-            add_edge(segment_id, company_id, "公司映射", sub_segment)
+        for row in item.get("revenue_mix", [])[:5]:
+            label = row.get("item_name") or "收入来源"
+            node_id = f"revenue:{code}:{label}"
+            title = json.dumps(row, ensure_ascii=False)
+            add_node(node_id, f"收入\n{label}", "revenue", title, 16)
+            add_edge(company_id, node_id, f"收入来源 {row.get('revenue_ratio', 0):.1%}", "东财F10主营构成")
 
-        industry = metrics.get("industry")
-        if industry:
-            industry_id = f"industry:{industry}"
-            add_node(industry_id, str(industry), "industry", "东财个股基本面行业字段", 18)
-            add_edge(company_id, industry_id, "所属行业", "东财个股基本面")
+        for row in item.get("cost_mix", [])[:5]:
+            label = row.get("item_name") or "成本去向"
+            node_id = f"cost:{code}:{label}"
+            title = json.dumps(row, ensure_ascii=False)
+            add_node(node_id, f"成本\n{label}", "cost", title, 16)
+            add_edge(node_id, company_id, f"成本构成 {row.get('cost_ratio', 0):.1%}", "东财F10主营构成；未等同具体供应商")
 
-        for concept in item.get("concepts", [])[:6]:
-            concept_id = f"concept:{concept}"
-            add_node(concept_id, str(concept), "concept", "东财概念/行业板块", 14)
-            add_edge(company_id, concept_id, "概念关联", "东财概念/行业板块")
+        model = item.get("business_model", {})
+        model_id = f"model:{code}:{model.get('model', '不确定')}"
+        add_node(model_id, model.get("model", "ToB/ToC 不确定"), "model", json.dumps(model, ensure_ascii=False), 18)
+        add_edge(company_id, model_id, "业务对象", model.get("evidence", ""))
 
-        if item.get("announcements"):
-            ann_id = f"ann:{code}"
-            add_node(ann_id, "近期公告", "evidence", json.dumps(item["announcements"], ensure_ascii=False), 13)
-            add_edge(company_id, ann_id, "公告证据", "巨潮公告")
-
-        if item.get("news"):
-            news_id = f"news:{code}"
-            add_node(news_id, "近期新闻", "evidence", json.dumps(item["news"], ensure_ascii=False), 13)
-            add_edge(company_id, news_id, "新闻线索", "东财新闻")
-
-        fund_date = metrics.get("fund_latest_date")
-        if fund_date:
-            fund_id = f"fund:{code}"
-            add_node(fund_id, f"资金流\n{fund_date}", "evidence", json.dumps(metrics, ensure_ascii=False), 13)
-            add_edge(company_id, fund_id, "资金流", "东财120日资金流摘要")
+        for related in related_companies_for_target(code, company_rows):
+            related_id = f"related:{related['ticker']}"
+            add_node(related_id, f"{related['company_name']}\n{related['ticker']}", "related", json.dumps(related, ensure_ascii=False), 14)
+            if "上游" in related["relation"]:
+                add_edge(related_id, company_id, related["relation"], related["evidence"])
+            else:
+                add_edge(company_id, related_id, related["relation"], related["evidence"])
 
     return {"nodes": list(nodes.values()), "edges": edges}
 
@@ -272,15 +318,7 @@ def current_run_date() -> str:
 
 class IndustryChainAgent:
     def __init__(self) -> None:
-        self._retriever: Any | None = None
-
-    @property
-    def retriever(self) -> Any:
-        if self._retriever is None:
-            from src.retriever.retriever import ChromaRetriever
-
-            self._retriever = ChromaRetriever()
-        return self._retriever
+        pass
 
     def answer(
         self,
@@ -288,93 +326,53 @@ class IndustryChainAgent:
         top_k: int = 5,
         provider: str | None = None,
         model: str | None = None,
-        research_mode: str = "local_rag",
-        online_limit: int = 2,
+        research_mode: str = "company_ops",
+        online_limit: int = 1,
     ) -> dict[str, Any]:
         if not question.strip():
             raise ValueError("question cannot be empty")
 
         mode = research_mode.lower().strip()
-        if mode not in {"local_rag", "a_stock_online", "bottleneck_hunter", "serenity"}:
-            raise ValueError("research_mode must be one of: local_rag, a_stock_online, bottleneck_hunter, serenity")
+        if mode != "company_ops":
+            mode = "company_ops"
 
         chat_config = resolve_chat_config(provider=provider, model=model)
         client = create_chat_client(provider=chat_config.provider)
         companies = load_companies()
 
-        if mode != "local_rag":
-            matched_companies = filter_companies(question, companies, limit=online_limit)
-            data_client = AShareDataClient()
-            codes = extract_codes_from_question(question, matched_companies if not matched_companies.empty else companies, limit=online_limit)
-            search_sources: list[AShareSource] = []
-            if not codes:
-                codes, search_sources, _ = data_client.resolve_targets(question, limit=online_limit)
-            online_sources = [*search_sources, *data_client.collect(codes)]
-            snapshots = build_operating_snapshots(online_sources)
-            graph = build_relationship_graph(question, online_sources, matched_companies)
-            run_date = current_run_date()
-            user_prompt = build_online_research_prompt(
-                question=question,
-                research_mode=mode,
-                run_date=run_date,
-                online_context=format_online_context(online_sources),
-                company_context=format_company_context(matched_companies),
-            )
-            response = client.chat.completions.create(
-                model=chat_config.model,
-                messages=[
-                    {"role": "system", "content": ONLINE_RESEARCH_SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=0.2,
-            )
-            answer = response.choices[0].message.content or ""
-            return {
-                "answer": answer,
-                "sources": format_source_rows(online_sources),
-                "provider": chat_config.provider,
-                "model": chat_config.model,
-                "research_mode": mode,
-                "run_date": run_date,
-                "targets": codes,
-                "operating_snapshots": snapshots,
-                "graph": graph,
-            }
-
-        chunks = self.retriever.retrieve(question, top_k=top_k)
-        filtered_companies = filter_companies(question, companies)
-        user_prompt = build_report_prompt(
+        data_client = AShareDataClient()
+        codes, online_sources = data_client.collect_company_ops(question, limit=1)
+        matched_companies = companies[companies["ticker"].astype(str).isin(codes)] if codes else filter_companies(question, companies, limit=1)
+        snapshots = build_operating_snapshots(online_sources)
+        graph = build_relationship_graph(question, online_sources, companies)
+        run_date = current_run_date()
+        user_prompt = build_company_ops_prompt(
             question=question,
-            retrieved_context=format_retrieved_context(chunks),
-            company_context=format_company_context(filtered_companies),
+            run_date=run_date,
+            online_context=format_online_context(online_sources),
+            graph_context=json.dumps(
+                {"targets": codes, "snapshots": snapshots, "graph": graph, "related_company_mapping": format_company_context(matched_companies)},
+                ensure_ascii=False,
+                indent=2,
+            ),
         )
-
         response = client.chat.completions.create(
             model=chat_config.model,
             messages=[
-                {"role": "system", "content": REPORT_SYSTEM_PROMPT},
+                {"role": "system", "content": COMPANY_OPS_SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.2,
         )
         answer = response.choices[0].message.content or ""
-        sources = [
-            {
-                "source": chunk.metadata.get("source"),
-                "chunk_index": chunk.metadata.get("chunk_index"),
-                "theme": chunk.metadata.get("theme"),
-                "distance": chunk.distance,
-            }
-            for chunk in chunks
-        ]
         return {
             "answer": answer,
-            "sources": sources,
+            "sources": format_source_rows(online_sources),
             "provider": chat_config.provider,
             "model": chat_config.model,
             "research_mode": mode,
-            "run_date": current_run_date(),
-            "targets": [],
-            "operating_snapshots": [],
-            "graph": {"nodes": [], "edges": []},
+            "run_date": run_date,
+            "targets": codes,
+            "operating_snapshots": snapshots,
+            "graph": graph,
         }

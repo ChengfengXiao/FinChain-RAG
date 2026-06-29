@@ -199,6 +199,134 @@ def build_operating_snapshots(sources: list[AShareSource]) -> list[dict[str, Any
     return list(grouped.values())
 
 
+def build_financial_quality_snapshots(sources: list[AShareSource]) -> list[dict[str, Any]]:
+    snapshots = []
+    for source in sources:
+        if source.status == "ok" and source.source == "financial_quality" and isinstance(source.data, dict):
+            snapshots.append(source.data)
+    return snapshots
+
+
+def latest_value(snapshot: dict[str, Any], field: str) -> Any:
+    latest = snapshot.get("latest_period") or {}
+    return latest.get(field)
+
+
+def positive_count(rows: list[dict[str, Any]], field: str) -> int:
+    return sum(1 for row in rows if isinstance(row.get(field), (int, float)) and row.get(field) > 0)
+
+
+def growth_rate(rows: list[dict[str, Any]], field: str) -> float | None:
+    valid = [row.get(field) for row in rows if isinstance(row.get(field), (int, float))]
+    if len(valid) < 2 or valid[-1] in {0, None}:
+        return None
+    oldest = valid[-1]
+    latest = valid[0]
+    if not isinstance(oldest, (int, float)) or oldest == 0:
+        return None
+    return latest / oldest - 1
+
+
+def score_financial_quality(snapshot: dict[str, Any]) -> dict[str, Any]:
+    annual = snapshot.get("annual_periods", [])
+    latest = annual[0] if annual else snapshot.get("latest_period", {})
+    score = 0
+    details: list[str] = []
+
+    deduct_ratio = latest.get("deduct_net_profit_ratio")
+    if isinstance(deduct_ratio, (int, float)):
+        if deduct_ratio >= 0.9:
+            score += 12
+            details.append("扣非净利润与归母净利润匹配度高")
+        elif deduct_ratio >= 0.7:
+            score += 8
+            details.append("扣非净利润与归母净利润基本匹配")
+        else:
+            score += 3
+            details.append("扣非净利润占比偏低，需核查非经常性损益")
+    else:
+        details.append("扣非净利润字段缺失，利润质量扣分")
+
+    ocf_ratio = latest.get("ocf_net_profit_ratio")
+    if isinstance(ocf_ratio, (int, float)):
+        if ocf_ratio >= 1:
+            score += 15
+            details.append("经营现金流覆盖净利润")
+        elif ocf_ratio >= 0.6:
+            score += 9
+            details.append("经营现金流部分覆盖净利润")
+        else:
+            score += 3
+            details.append("经营现金流覆盖净利润不足")
+    else:
+        details.append("经营现金流覆盖率缺失")
+
+    if positive_count(annual, "free_cashflow") >= 4:
+        score += 12
+        details.append("近5年多数年份自由现金流为正")
+    elif positive_count(annual, "free_cashflow") >= 2:
+        score += 7
+        details.append("近5年部分年份自由现金流为正")
+    else:
+        score += 2
+        details.append("自由现金流稳定性不足")
+
+    revenue_growth = growth_rate(annual, "revenue")
+    deduct_growth = growth_rate(annual, "deduct_net_profit")
+    ocf_growth = growth_rate(annual, "operating_cashflow")
+    growth_hits = sum(1 for item in [revenue_growth, deduct_growth, ocf_growth] if isinstance(item, (int, float)) and item > 0)
+    score += {3: 15, 2: 10, 1: 5}.get(growth_hits, 1)
+    details.append(f"近5年营收/扣非/经营现金流增长同步项：{growth_hits}/3")
+
+    debt_ratio = latest.get("debt_asset_ratio")
+    cash_short = latest.get("cash_short_debt_ratio")
+    interest_coverage = latest.get("interest_coverage")
+    if isinstance(debt_ratio, (int, float)) and debt_ratio <= 0.55:
+        score += 8
+    elif isinstance(debt_ratio, (int, float)) and debt_ratio <= 0.7:
+        score += 5
+    else:
+        score += 1
+    if isinstance(cash_short, (int, float)) and cash_short >= 1:
+        score += 5
+    elif cash_short is None:
+        details.append("现金短债比字段不完整")
+    if isinstance(interest_coverage, (int, float)) and interest_coverage >= 3:
+        score += 5
+    elif interest_coverage is None:
+        details.append("利息保障倍数字段不完整")
+
+    receivable_ratio = latest.get("receivable_revenue_ratio")
+    inventory_ratio = latest.get("inventory_revenue_ratio")
+    goodwill_ratio = latest.get("goodwill_assets_ratio")
+    if isinstance(receivable_ratio, (int, float)) and receivable_ratio <= 0.35:
+        score += 6
+    elif isinstance(receivable_ratio, (int, float)) and receivable_ratio <= 0.6:
+        score += 3
+    if isinstance(inventory_ratio, (int, float)) and inventory_ratio <= 0.25:
+        score += 5
+    elif isinstance(inventory_ratio, (int, float)) and inventory_ratio <= 0.5:
+        score += 2
+    if goodwill_ratio is None or goodwill_ratio <= 0.05:
+        score += 5
+    elif goodwill_ratio <= 0.15:
+        score += 2
+
+    score += 10  # 商业模式、行业地位、护城河、估值需要 LLM 结合文本和估值字段进一步修正。
+    score = max(0, min(int(round(score)), 100))
+    if score >= 85:
+        label = "顶级公司"
+    elif score >= 70:
+        label = "优秀公司"
+    elif score >= 55:
+        label = "普通公司"
+    elif score >= 40:
+        label = "高风险公司"
+    else:
+        label = "应回避公司"
+    return {"score": score, "label": label, "details": details}
+
+
 def infer_business_model(text: str) -> dict[str, str]:
     to_b_keywords = ["设备", "工业", "数据中心", "机房", "通信", "客户", "工程", "系统", "企业", "电力", "汽车", "能源", "服务器"]
     to_c_keywords = ["消费者", "零售", "门店", "个人", "食品", "饮料", "服装", "家居", "旅游", "游戏", "会员"]
@@ -368,8 +496,8 @@ class IndustryChainAgent:
             raise ValueError("question cannot be empty")
 
         mode = research_mode.lower().strip()
-        if mode != "company_ops":
-            mode = "company_ops"
+        if mode not in {"company_quality", "company_ops"}:
+            mode = "company_quality"
 
         chat_config = resolve_chat_config(provider=provider, model=model)
         client = create_chat_client(provider=chat_config.provider)
@@ -379,14 +507,21 @@ class IndustryChainAgent:
         codes, online_sources = data_client.collect_company_ops(question, limit=1)
         matched_companies = companies[companies["ticker"].astype(str).isin(codes)] if codes else filter_companies(question, companies, limit=1)
         snapshots = build_operating_snapshots(online_sources)
-        graph = build_relationship_graph(question, online_sources, companies)
+        financial_quality = build_financial_quality_snapshots(online_sources)
+        quality_score = score_financial_quality(financial_quality[0]) if financial_quality else {"score": 0, "label": "数据不足", "details": ["未抓取到财务质量数据"]}
         run_date = current_run_date()
         user_prompt = build_company_ops_prompt(
             question=question,
             run_date=run_date,
             online_context=format_online_context(online_sources),
-            graph_context=json.dumps(
-                {"targets": codes, "snapshots": snapshots, "graph": graph, "related_company_mapping": format_company_context(matched_companies)},
+            financial_context=json.dumps(
+                {
+                    "targets": codes,
+                    "operating_snapshots": snapshots,
+                    "financial_quality": financial_quality,
+                    "preliminary_score": quality_score,
+                    "structured_company_mapping": format_company_context(matched_companies),
+                },
                 ensure_ascii=False,
                 indent=2,
             ),
@@ -409,5 +544,6 @@ class IndustryChainAgent:
             "run_date": run_date,
             "targets": codes,
             "operating_snapshots": snapshots,
-            "graph": graph,
+            "financial_quality": financial_quality,
+            "quality_score": quality_score,
         }

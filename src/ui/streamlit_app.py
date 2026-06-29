@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from html import escape
 import os
+from html import escape
 from typing import Any
 
+import pandas as pd
 import requests
 import streamlit as st
 
@@ -33,7 +34,7 @@ def ask_api(company_query: str, provider: str, model: str) -> dict[str, Any]:
         "question": company_query,
         "provider": provider,
         "model": model,
-        "research_mode": "company_ops",
+        "research_mode": "company_quality",
         "online_limit": 1,
     }
     response = api_session().post(ASK_URL, json=payload, timeout=300)
@@ -55,165 +56,100 @@ def fmt_number(value: Any, unit: str = "") -> str:
     return f"{number:.2f}{unit}"
 
 
-def pct(value: Any) -> float:
-    try:
-        return max(0.0, min(float(value or 0) * 100, 100.0))
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def fmt_pct(value: Any) -> str:
+def fmt_ratio(value: Any) -> str:
     if value in {"", None}:
         return "-"
     try:
-        return f"{float(value) * 100:.2f}%"
+        return f"{float(value) * 100:.1f}%"
     except (TypeError, ValueError):
         return str(value)
 
 
-def card(label: str, value: str, sub: str = "") -> str:
+def metric_card(label: str, value: str, sub: str = "") -> str:
     return f"""
     <div class="metric-card">
-      <div class="metric-label">{label}</div>
-      <div class="metric-value">{value}</div>
-      <div class="metric-sub">{sub}</div>
+      <div class="metric-label">{escape(label)}</div>
+      <div class="metric-value">{escape(value)}</div>
+      <div class="metric-sub">{escape(sub)}</div>
     </div>
     """
 
 
-def render_graph(graph: dict[str, Any]) -> None:
-    nodes = graph.get("nodes", [])
-    edges = graph.get("edges", [])
-    if not nodes:
-        st.info("暂无关系图谱。通常是未识别到 A 股公司或公开接口失败。")
-        return
+def score_class(score: int) -> str:
+    if score >= 85:
+        return "score-strong"
+    if score >= 70:
+        return "score-good"
+    if score >= 55:
+        return "score-mid"
+    return "score-risk"
 
-    node_map = {node["id"]: node for node in nodes}
-    company_nodes = [node for node in nodes if node.get("group") == "company"]
-    target = company_nodes[0] if company_nodes else nodes[0]
-    target_id = target["id"]
 
-    upstream = []
-    downstream = []
-    peers = []
-    for edge in edges:
-        source = node_map.get(edge.get("from"))
-        target_node = node_map.get(edge.get("to"))
-        if not source or not target_node:
-            continue
-        if edge.get("to") == target_id:
-            upstream.append((source, edge))
-        elif edge.get("from") == target_id:
-            edge_label = edge.get("label", "")
-            if "同层" in edge_label or "同主题" in edge_label:
-                peers.append((target_node, edge))
-            else:
-                downstream.append((target_node, edge))
-
-    def company_card(node: dict[str, Any], edge: dict[str, Any] | None = None, kind: str = "peer") -> str:
-        label = escape(str(node.get("label", ""))).replace("\n", "<br/>")
-        edge_label = escape(str(edge.get("label", ""))) if edge else "目标公司"
-        title = escape(str(edge.get("title", ""))) if edge else "目标公司"
-        return f"""
-        <div class="graph-card {kind}">
-          <div class="graph-node-name">{label}</div>
-          <div class="graph-edge-label">{edge_label}</div>
-          <div class="graph-note">{title}</div>
+def render_score(score_data: dict[str, Any]) -> None:
+    score = int(score_data.get("score") or 0)
+    label = score_data.get("label") or "数据不足"
+    details = score_data.get("details") or []
+    st.markdown(
+        f"""
+        <div class="score-panel {score_class(score)}">
+          <div>
+            <div class="score-label">质量评分</div>
+            <div class="score-main">{score}<span>/100</span></div>
+          </div>
+          <div>
+            <div class="score-rank">{escape(label)}</div>
+            <div class="score-notes">{escape("；".join(details[:3]))}</div>
+          </div>
         </div>
-        """
-
-    def card_list(items: list[tuple[dict[str, Any], dict[str, Any]]], empty_text: str, kind: str) -> str:
-        if not items:
-            return f'<div class="graph-empty">{empty_text}</div>'
-        return "".join(company_card(node, edge, kind) for node, edge in items)
-
-    html = f"""
-    <div class="graph-wrap">
-      <div class="graph-lane">
-        <div class="graph-lane-title">可能一层上游公司线索</div>
-        {card_list(upstream, "公开抓取数据未披露具体供应商公司名；结构化映射中也没有可连的上游公司。", "upstream")}
-      </div>
-      <div class="graph-center">
-        {company_card(target, None, "target")}
-        <div class="graph-disclaimer">{escape(graph.get("note", "图谱只展示公司到公司的结构化线索。"))}</div>
-      </div>
-      <div class="graph-lane">
-        <div class="graph-lane-title">可能销售方向/同主题公司线索</div>
-        {card_list(downstream + peers, "公开抓取数据未披露具体客户公司名；结构化映射中也没有可连的销售方向公司。", "downstream")}
-      </div>
-    </div>
-    """
-    st.markdown(html, unsafe_allow_html=True)
+        """,
+        unsafe_allow_html=True,
+    )
 
 
-def render_composition(title: str, rows: list[dict[str, Any]], ratio_key: str, amount_key: str) -> None:
-    st.markdown(f"### {title}")
-    if not rows:
-        st.caption("公开数据未返回该构成。")
-        return
-    blocks = []
+def render_key_metrics(snapshot: dict[str, Any], operating: dict[str, Any]) -> None:
+    latest = snapshot.get("latest_period") or {}
+    metrics = operating.get("metrics", {})
+    cards = [
+        metric_card("PE(TTM)", fmt_number(metrics.get("pe_ttm")), "腾讯行情"),
+        metric_card("PB", fmt_number(metrics.get("pb")), "腾讯行情"),
+        metric_card("营收", fmt_number(latest.get("revenue")), latest.get("report_date", "")),
+        metric_card("扣非净利润", fmt_number(latest.get("deduct_net_profit")), latest.get("report_date", "")),
+        metric_card("经营现金流/净利润", fmt_ratio(latest.get("ocf_net_profit_ratio")), "现金流覆盖"),
+        metric_card("自由现金流", fmt_number(latest.get("free_cashflow")), "OCF - CAPEX"),
+        metric_card("资产负债率", fmt_ratio(latest.get("debt_asset_ratio")), "负债安全"),
+        metric_card("现金短债比", fmt_number(latest.get("cash_short_debt_ratio")), "短债覆盖"),
+    ]
+    st.markdown(f'<div class="metric-grid">{"".join(cards)}</div>', unsafe_allow_html=True)
+
+
+def finance_table(rows: list[dict[str, Any]]) -> pd.DataFrame:
+    columns = {
+        "report_date": "报告期",
+        "revenue": "营收",
+        "net_profit": "归母净利润",
+        "deduct_net_profit": "扣非净利润",
+        "operating_cashflow": "经营现金流",
+        "free_cashflow": "自由现金流",
+        "debt_asset_ratio": "资产负债率",
+        "cash_short_debt_ratio": "现金短债比",
+        "receivable_revenue_ratio": "应收/营收",
+        "inventory_revenue_ratio": "存货/营收",
+    }
+    data = []
     for row in rows:
-        ratio = pct(row.get(ratio_key))
-        amount_label = fmt_number(row.get(amount_key))
-        ratio_label = fmt_pct(row.get(ratio_key))
-        gross_margin_label = fmt_pct(row.get("gross_margin"))
-        blocks.append(
-            f"""
-            <div class="mix-row">
-              <div class="mix-top">
-                <span class="mix-name">{escape(str(row.get("item_name") or "-"))}</span>
-                <span class="mix-ratio">{ratio_label}</span>
-              </div>
-              <div class="bar"><div class="bar-fill" style="width:{ratio:.1f}%"></div></div>
-              <div class="mix-meta">
-                <span>金额：{amount_label}</span>
-                <span>占比：{ratio_label}</span>
-                <span>毛利率：{gross_margin_label}</span>
-                <span>报告期：{escape(str(row.get("report_date") or "-"))}</span>
-              </div>
-            </div>
-            """
-        )
-    st.markdown("".join(blocks), unsafe_allow_html=True)
-
-
-def render_snapshot(snapshot: dict[str, Any]) -> None:
-    metrics = snapshot.get("metrics", {})
-    business_model = snapshot.get("business_model", {})
-    st.markdown(
-        f"""
-        <div class="metric-grid">
-          {card("最新价", fmt_number(metrics.get("price")), "腾讯行情")}
-          {card("涨跌幅", fmt_number(metrics.get("change_pct"), "%"), "腾讯行情")}
-          {card("PE(TTM)", fmt_number(metrics.get("pe_ttm")), "腾讯行情")}
-          {card("PB", fmt_number(metrics.get("pb")), "腾讯行情")}
-          {card("ToB / ToC", business_model.get("model", "不确定"), business_model.get("evidence", ""))}
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    st.markdown(
-        f"""
-        <div class="info-strip">
-          <span>行业：{metrics.get("industry") or "-"}</span>
-          <span>主营构成报告期：{snapshot.get("composition_date") or "-"}</span>
-          <span>判断置信度：{business_model.get("confidence", "-")}</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    if snapshot.get("business_scope"):
-        with st.expander("主营范围，来自东财F10"):
-            st.write(snapshot.get("business_scope"))
-
-    st.info("收入和成本来自东财F10主营构成。图谱只连公司；如果财报/公开抓取数据没有披露具体客户或供应商公司名，就不把收入、成本项目伪装成公司节点。")
-
-    left, right = st.columns(2)
-    with left:
-        render_composition("收入来自哪里", snapshot.get("revenue_mix", []), "revenue_ratio", "revenue_yuan")
-    with right:
-        render_composition("成本/支出主要去向", snapshot.get("cost_mix", []), "cost_ratio", "cost_yuan")
+        item = {}
+        for key, label in columns.items():
+            value = row.get(key)
+            if key in {"cash_short_debt_ratio"}:
+                item[label] = fmt_number(value)
+            elif key.endswith("_ratio") or key == "debt_asset_ratio":
+                item[label] = fmt_ratio(value)
+            elif key == "report_date":
+                item[label] = value
+            else:
+                item[label] = fmt_number(value)
+        data.append(item)
+    return pd.DataFrame(data)
 
 
 def render_sources(sources: list[dict[str, Any]]) -> None:
@@ -226,48 +162,32 @@ def render_sources(sources: list[dict[str, Any]]) -> None:
     st.json(sources, expanded=False)
 
 
-st.set_page_config(page_title="FinChain-RAG 公司运营图谱", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="真实利润与现金流企业分析", layout="wide", initial_sidebar_state="collapsed")
 st.markdown(
     """
     <style>
-    .block-container {padding-top: 1.2rem; max-width: 1380px;}
-    section[data-testid="stSidebar"] {background: #f8fafc;}
-    .hero {
-      border: 1px solid #e5e7eb; border-radius: 8px; padding: 22px 26px;
-      background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
-      margin-bottom: 18px;
-    }
-    .title {font-size: 34px; font-weight: 760; color: #0f172a; line-height: 1.15;}
-    .subtitle {color: #475569; margin-top: 8px; font-size: 15px;}
-    .metric-grid {display:grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap:12px; margin: 16px 0;}
+    .block-container {padding-top: 1.2rem; max-width: 1360px;}
+    .hero {border:1px solid #e5e7eb; border-radius:8px; padding:22px 26px; background:#ffffff; margin-bottom:18px;}
+    .title {font-size:32px; font-weight:760; color:#0f172a; line-height:1.2;}
+    .subtitle {color:#475569; margin-top:8px; font-size:15px; max-width:980px;}
+    .metric-grid {display:grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap:12px; margin: 16px 0;}
     .metric-card {border:1px solid #e5e7eb; border-radius:8px; padding:14px 16px; background:#fff;}
     .metric-label {font-size:12px; color:#64748b; margin-bottom:8px;}
-    .metric-value {font-size:22px; color:#0f172a; font-weight:720; line-height:1.2;}
+    .metric-value {font-size:21px; color:#0f172a; font-weight:720; line-height:1.2;}
     .metric-sub {font-size:12px; color:#64748b; margin-top:6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
-    .info-strip {display:flex; gap:20px; border:1px solid #e5e7eb; border-radius:8px; padding:10px 14px; color:#475569; background:#f8fafc; margin-bottom:16px;}
-    .mix-row {border:1px solid #e5e7eb; border-radius:8px; padding:12px 14px; background:#fff; margin-bottom:10px;}
-    .mix-top {display:flex; justify-content:space-between; gap:12px; align-items:center;}
-    .mix-name {font-weight:650; color:#0f172a;}
-    .mix-ratio {font-weight:700; color:#0f766e;}
-    .bar {height:8px; background:#e2e8f0; border-radius:999px; overflow:hidden; margin:10px 0 8px;}
-    .bar-fill {height:100%; background:#0f766e; border-radius:999px;}
-    .mix-meta {display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap; color:#64748b; font-size:12px;}
-    .graph-wrap {display:grid; grid-template-columns: 1fr 0.9fr 1fr; gap:14px; align-items:start; margin-top:10px;}
-    .graph-lane, .graph-center {border:1px solid #e5e7eb; border-radius:8px; background:#fff; padding:14px;}
-    .graph-center {background:#f8fafc;}
-    .graph-lane-title {font-size:13px; color:#64748b; margin-bottom:10px; font-weight:650;}
-    .graph-card {border:1px solid #e5e7eb; border-radius:8px; padding:12px; margin-bottom:10px; background:#fff;}
-    .graph-card.target {border-color:#1d4ed8; background:#eff6ff;}
-    .graph-card.upstream {border-left:4px solid #0f766e;}
-    .graph-card.downstream {border-left:4px solid #7c3aed;}
-    .graph-node-name {font-size:16px; font-weight:720; color:#0f172a; line-height:1.25;}
-    .graph-edge-label {font-size:13px; color:#334155; margin-top:8px; font-weight:650;}
-    .graph-note {font-size:12px; color:#64748b; margin-top:6px; line-height:1.45;}
-    .graph-empty {font-size:13px; color:#64748b; border:1px dashed #cbd5e1; border-radius:8px; padding:12px; background:#f8fafc;}
-    .graph-disclaimer {font-size:12px; color:#64748b; line-height:1.5; margin-top:10px;}
-    .section-title {font-size:20px; font-weight:720; margin:18px 0 8px; color:#0f172a;}
+    .score-panel {display:flex; gap:24px; align-items:center; border-radius:8px; padding:18px 20px; margin:16px 0; border:1px solid #e5e7eb;}
+    .score-label {font-size:12px; color:#64748b;}
+    .score-main {font-size:44px; font-weight:800; line-height:1; color:#0f172a;}
+    .score-main span {font-size:18px; color:#64748b; margin-left:4px;}
+    .score-rank {font-size:22px; font-weight:760; color:#0f172a;}
+    .score-notes {font-size:13px; color:#475569; margin-top:8px; line-height:1.5;}
+    .score-strong {background:#ecfdf5; border-color:#bbf7d0;}
+    .score-good {background:#eff6ff; border-color:#bfdbfe;}
+    .score-mid {background:#fffbeb; border-color:#fde68a;}
+    .score-risk {background:#fef2f2; border-color:#fecaca;}
+    .section-title {font-size:20px; font-weight:720; margin:20px 0 8px; color:#0f172a;}
     div[data-testid="stButton"] button {border-radius:8px; height:42px;}
-    @media (max-width: 900px) {.metric-grid {grid-template-columns: repeat(2, minmax(0, 1fr));}.info-strip {display:block;}.graph-wrap {grid-template-columns: 1fr;}}
+    @media (max-width: 900px) {.metric-grid {grid-template-columns: repeat(2, minmax(0, 1fr));}.score-panel {display:block;}}
     </style>
     """,
     unsafe_allow_html=True,
@@ -275,8 +195,8 @@ st.markdown(
 st.markdown(
     """
     <div class="hero">
-      <div class="title">公司运营关系图谱</div>
-      <div class="subtitle">输入 A 股公司名或代码，查看收入构成、成本构成、ToB/ToC 判断，以及一层公司线索。图谱只连公司，不把收入或成本项目画成公司。</div>
+      <div class="title">真实利润与现金流企业分析</div>
+      <div class="subtitle">输入 A 股公司名或代码，按最近5年 + 最近4季度框架分析商业模式、行业地位、护城河、真实利润、真实现金流、增长质量、负债风险、财务异常和估值匹配。</div>
     </div>
     """,
     unsafe_allow_html=True,
@@ -308,7 +228,7 @@ for idx, example in enumerate(examples):
         query = example
 
 if run_clicked:
-    with st.spinner("正在抓取公开数据并生成图谱..."):
+    with st.spinner("正在抓取最近5年和最近4季度财务数据..."):
         try:
             result = ask_api(query, provider, model)
         except requests.exceptions.HTTPError as exc:
@@ -319,23 +239,34 @@ if run_clicked:
             st.stop()
 
     snapshots = result.get("operating_snapshots", [])
-    graph = result.get("graph", {})
+    operating = snapshots[0] if snapshots else {}
+    financial_list = result.get("financial_quality", [])
+    financial = financial_list[0] if financial_list else {}
+    score_data = result.get("quality_score", {})
     st.caption(f"运行日期：{result.get('run_date')} | 标的：{', '.join(result.get('targets', [])) or '-'} | 模型：{result.get('provider')} / {result.get('model')}")
 
-    if snapshots:
-        snapshot = snapshots[0]
-        st.markdown(f'<div class="section-title">{snapshot.get("name") or query} · {snapshot.get("code", "")}</div>', unsafe_allow_html=True)
-        render_snapshot(snapshot)
+    name = operating.get("name") or query
+    code = operating.get("code") or (result.get("targets") or [""])[0]
+    st.markdown(f'<div class="section-title">{escape(str(name))} · {escape(str(code))}</div>', unsafe_allow_html=True)
+
+    if financial:
+        render_score(score_data)
+        render_key_metrics(financial, operating)
+
+        left, right = st.columns(2, gap="large")
+        with left:
+            st.markdown('<div class="section-title">最近5年年度财务质量</div>', unsafe_allow_html=True)
+            st.dataframe(finance_table(financial.get("annual_periods", [])), hide_index=True, use_container_width=True)
+        with right:
+            st.markdown('<div class="section-title">最近4个季度财务质量</div>', unsafe_allow_html=True)
+            st.dataframe(finance_table(financial.get("recent_quarters", [])), hide_index=True, use_container_width=True)
     else:
-        st.warning("未能生成运营快照。请确认输入的是 A 股公司名或 6 位代码。")
+        st.warning("未能抓取财务质量数据。请确认输入的是 A 股公司名或 6 位代码。")
 
-    left, right = st.columns([1.25, 1], gap="large")
-    with left:
-        st.markdown('<div class="section-title">一层关系图谱</div>', unsafe_allow_html=True)
-        render_graph(graph)
-    with right:
-        st.markdown('<div class="section-title">AI 运营分析</div>', unsafe_allow_html=True)
-        st.markdown(result.get("answer", ""))
+    st.markdown('<div class="section-title">AI 框架分析报告</div>', unsafe_allow_html=True)
+    st.markdown(result.get("answer", ""))
 
-    with st.expander("数据源审计"):
+    with st.expander("主营范围和数据源审计"):
+        if operating.get("business_scope"):
+            st.write(operating.get("business_scope"))
         render_sources(result.get("sources", []))

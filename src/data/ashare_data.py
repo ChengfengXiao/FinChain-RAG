@@ -115,6 +115,7 @@ class AShareDataClient:
                 [
                     self._safe_one(code, "eastmoney_stock_info", "东财个股基本面", lambda c=code: self.eastmoney_stock_info(c)),
                     self._safe_one(code, "eastmoney_business_analysis", "东财F10经营分析/主营构成", lambda c=code: self.eastmoney_business_analysis(c)),
+                    self._safe_one(code, "financial_quality", "东财/新浪最近5年+4季度财务质量数据", lambda c=code: self.financial_quality(c)),
                     self._safe_one(code, "eastmoney_concept_blocks", "东财概念/行业板块", lambda c=code: self.eastmoney_concept_blocks(c)),
                     self._safe_one(code, "stock_fund_flow_120d", "东财120日资金流摘要", lambda c=code: self.fund_flow_summary(c)),
                     self._safe_one(
@@ -406,6 +407,162 @@ class AShareDataClient:
             "composition": rows,
         }
 
+    def eastmoney_datacenter(
+        self,
+        report_name: str,
+        code: str,
+        page_size: int = 24,
+        sort_columns: str = "REPORT_DATE",
+        sort_types: str = "-1",
+    ) -> list[dict[str, Any]]:
+        response = self._em_get(
+            "https://datacenter-web.eastmoney.com/api/data/v1/get",
+            params={
+                "reportName": report_name,
+                "columns": "ALL",
+                "filter": f'(SECURITY_CODE="{code}")',
+                "pageNumber": "1",
+                "pageSize": str(page_size),
+                "sortColumns": sort_columns,
+                "sortTypes": sort_types,
+                "source": "WEB",
+                "client": "WEB",
+            },
+            timeout=12,
+        )
+        return ((response.json().get("result") or {}).get("data")) or []
+
+    def sina_financial_report(self, code: str, report_type: str, num: int = 24) -> list[dict[str, Any]]:
+        response = self.session.get(
+            "https://quotes.sina.cn/cn/api/openapi.php/CompanyFinanceService.getFinanceReport2022",
+            params={
+                "paperCode": f"{market_prefix(code)}{code}",
+                "source": report_type,
+                "type": "0",
+                "page": "1",
+                "num": str(num),
+            },
+            headers={"User-Agent": UA},
+            timeout=15,
+        )
+        response.raise_for_status()
+        report_list = response.json().get("result", {}).get("data", {}).get("report_list", {}) or {}
+        rows = []
+        for period in sorted(report_list.keys(), reverse=True)[:num]:
+            row = {"report_date": f"{period[:4]}-{period[4:6]}-{period[6:8]}"}
+            for item in report_list[period].get("data", []) or []:
+                title = item.get("item_title", "")
+                if not title:
+                    continue
+                row[title] = _to_optional_float(item.get("item_value"))
+            rows.append(row)
+        return rows
+
+    def financial_quality(self, code: str) -> dict[str, Any]:
+        income_rows = self.eastmoney_datacenter("RPT_DMSK_FN_INCOME", code, page_size=24)
+        cashflow_rows = self.eastmoney_datacenter("RPT_DMSK_FN_CASHFLOW", code, page_size=24)
+        balance_rows = self.eastmoney_datacenter("RPT_DMSK_FN_BALANCE", code, page_size=24)
+        sina_income_rows = self.sina_financial_report(code, "lrb", num=24)
+        sina_balance_rows = self.sina_financial_report(code, "fzb", num=24)
+
+        by_date: dict[str, dict[str, Any]] = {}
+        for row in income_rows:
+            report_date = _report_date(row.get("REPORT_DATE"))
+            by_date.setdefault(report_date, {})["income"] = row
+        for row in cashflow_rows:
+            report_date = _report_date(row.get("REPORT_DATE"))
+            by_date.setdefault(report_date, {})["cashflow"] = row
+        for row in balance_rows:
+            report_date = _report_date(row.get("REPORT_DATE"))
+            by_date.setdefault(report_date, {})["balance"] = row
+        for row in sina_income_rows:
+            by_date.setdefault(row["report_date"], {})["sina_income"] = row
+        for row in sina_balance_rows:
+            by_date.setdefault(row["report_date"], {})["sina_balance"] = row
+
+        periods = []
+        for report_date in sorted((date for date in by_date.keys() if date), reverse=True):
+            bundle = by_date[report_date]
+            row = self._financial_period_row(report_date, bundle)
+            if row:
+                periods.append(row)
+
+        annual = [row for row in periods if row["report_date"].endswith("-12-31")][:5]
+        recent_quarters = periods[:4]
+        return {
+            "code": code,
+            "annual_periods": annual,
+            "recent_quarters": recent_quarters,
+            "latest_period": periods[0] if periods else {},
+            "field_notes": {
+                "profit": "净利润、扣非净利润来自东财利润表数据；缺失则显示 null。",
+                "cashflow": "经营现金流和资本开支来自东财现金流量表；自由现金流=经营现金流-购建长期资产支付现金。",
+                "debt": "有息负债使用新浪资产负债表中的短期借款、一年内到期非流动负债、长期借款、应付债券、租赁负债等可得字段加总。",
+            },
+        }
+
+    def _financial_period_row(self, report_date: str, bundle: dict[str, Any]) -> dict[str, Any]:
+        income = bundle.get("income") or {}
+        cashflow = bundle.get("cashflow") or {}
+        balance = bundle.get("balance") or {}
+        sina_income = bundle.get("sina_income") or {}
+        sina_balance = bundle.get("sina_balance") or {}
+
+        revenue = _first_number(income.get("TOTAL_OPERATE_INCOME"), sina_income.get("营业收入"), sina_income.get("营业总收入"))
+        net_profit = _first_number(income.get("PARENT_NETPROFIT"), sina_income.get("归属于母公司所有者的净利润"), sina_income.get("净利润"))
+        deduct_net_profit = _first_number(income.get("DEDUCT_PARENT_NETPROFIT"))
+        operating_profit = _first_number(income.get("OPERATE_PROFIT"), sina_income.get("营业利润"))
+        interest_expense = _first_number(sina_income.get("利息费用"), sina_income.get("利息支出"))
+        operating_cashflow = _first_number(cashflow.get("NETCASH_OPERATE"))
+        capex = _first_number(cashflow.get("CONSTRUCT_LONG_ASSET"))
+        total_assets = _first_number(balance.get("TOTAL_ASSETS"), sina_balance.get("资产总计"))
+        total_liabilities = _first_number(balance.get("TOTAL_LIABILITIES"), sina_balance.get("负债合计"))
+        monetary_funds = _first_number(balance.get("MONETARYFUNDS"), sina_balance.get("货币资金"))
+        accounts_receivable = _first_number(balance.get("ACCOUNTS_RECE"), sina_balance.get("应收账款"), sina_balance.get("应收票据及应收账款"))
+        inventory = _first_number(balance.get("INVENTORY"), sina_balance.get("存货"))
+        goodwill = _first_number(sina_balance.get("商誉"))
+        short_debt = _sum_numbers(
+            sina_balance.get("短期借款"),
+            sina_balance.get("一年内到期的非流动负债"),
+            sina_balance.get("应付短期债券"),
+        )
+        interest_bearing_debt = _sum_numbers(
+            sina_balance.get("短期借款"),
+            sina_balance.get("一年内到期的非流动负债"),
+            sina_balance.get("长期借款"),
+            sina_balance.get("应付债券"),
+            sina_balance.get("租赁负债"),
+        )
+        free_cashflow = _safe_subtract(operating_cashflow, capex)
+
+        return {
+            "report_date": report_date,
+            "revenue": revenue,
+            "net_profit": net_profit,
+            "deduct_net_profit": deduct_net_profit,
+            "operating_profit": operating_profit,
+            "operating_cashflow": operating_cashflow,
+            "capex": capex,
+            "free_cashflow": free_cashflow,
+            "total_assets": total_assets,
+            "total_liabilities": total_liabilities,
+            "monetary_funds": monetary_funds,
+            "short_debt": short_debt,
+            "interest_bearing_debt": interest_bearing_debt,
+            "interest_expense": interest_expense,
+            "accounts_receivable": accounts_receivable,
+            "inventory": inventory,
+            "goodwill": goodwill,
+            "debt_asset_ratio": _safe_divide(total_liabilities, total_assets),
+            "cash_short_debt_ratio": _safe_divide(monetary_funds, short_debt),
+            "interest_coverage": _safe_divide(operating_profit, interest_expense),
+            "ocf_net_profit_ratio": _safe_divide(operating_cashflow, net_profit),
+            "deduct_net_profit_ratio": _safe_divide(deduct_net_profit, net_profit),
+            "receivable_revenue_ratio": _safe_divide(accounts_receivable, revenue),
+            "inventory_revenue_ratio": _safe_divide(inventory, revenue),
+            "goodwill_assets_ratio": _safe_divide(goodwill, total_assets),
+        }
+
     def eastmoney_concept_blocks(self, code: str) -> dict[str, Any]:
         params = {
             "fltt": "2",
@@ -584,6 +741,51 @@ def _to_float(value: Any) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _to_optional_float(value: Any) -> float | None:
+    try:
+        if value in {"", "-", None}:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _first_number(*values: Any) -> float | None:
+    for value in values:
+        number = _to_optional_float(value)
+        if number is not None:
+            return number
+    return None
+
+
+def _sum_numbers(*values: Any) -> float | None:
+    numbers = [_to_optional_float(value) for value in values]
+    valid = [number for number in numbers if number is not None]
+    if not valid:
+        return None
+    return sum(valid)
+
+
+def _safe_divide(numerator: Any, denominator: Any) -> float | None:
+    num = _to_optional_float(numerator)
+    den = _to_optional_float(denominator)
+    if num is None or den in {None, 0}:
+        return None
+    return num / den
+
+
+def _safe_subtract(left: Any, right: Any) -> float | None:
+    left_number = _to_optional_float(left)
+    right_number = _to_optional_float(right)
+    if left_number is None or right_number is None:
+        return None
+    return left_number - right_number
+
+
+def _report_date(value: Any) -> str:
+    return str(value or "")[:10]
 
 
 def _strip_html(value: str) -> str:

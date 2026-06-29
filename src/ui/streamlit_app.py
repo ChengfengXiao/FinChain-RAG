@@ -66,13 +66,13 @@ def fmt_ratio(value: Any) -> str:
 
 
 def metric_card(label: str, value: str, sub: str = "") -> str:
-    return f"""
-    <div class="metric-card">
-      <div class="metric-label">{escape(label)}</div>
-      <div class="metric-value">{escape(value)}</div>
-      <div class="metric-sub">{escape(sub)}</div>
-    </div>
-    """
+    return (
+        '<div class="metric-card">'
+        f'<div class="metric-label">{escape(label)}</div>'
+        f'<div class="metric-value">{escape(value)}</div>'
+        f'<div class="metric-sub">{escape(sub)}</div>'
+        "</div>"
+    )
 
 
 def score_class(score: int) -> str:
@@ -90,18 +90,14 @@ def render_score(score_data: dict[str, Any]) -> None:
     label = score_data.get("label") or "数据不足"
     details = score_data.get("details") or []
     st.markdown(
-        f"""
-        <div class="score-panel {score_class(score)}">
-          <div>
-            <div class="score-label">质量评分</div>
-            <div class="score-main">{score}<span>/100</span></div>
-          </div>
-          <div>
-            <div class="score-rank">{escape(label)}</div>
-            <div class="score-notes">{escape("；".join(details[:3]))}</div>
-          </div>
-        </div>
-        """,
+        (
+            f'<div class="score-panel {score_class(score)}">'
+            '<div><div class="score-label">质量评分</div>'
+            f'<div class="score-main">{score}<span>/100</span></div></div>'
+            f'<div><div class="score-rank">{escape(label)}</div>'
+            f'<div class="score-notes">{escape("；".join(details[:3]))}</div></div>'
+            "</div>"
+        ),
         unsafe_allow_html=True,
     )
 

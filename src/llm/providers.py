@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import httpx
 from openai import OpenAI
 
 from src.settings import get_env, llm_provider, provider_base_url, require_provider_api_key
@@ -43,6 +44,7 @@ def chat_model_for_provider(provider: str) -> str:
 def create_chat_client(provider: str | None = None) -> OpenAI:
     config = resolve_chat_config(provider=provider)
     api_key = require_provider_api_key(config.provider)
+    http_client = httpx.Client(trust_env=False, timeout=120)
     if config.base_url:
-        return OpenAI(api_key=api_key, base_url=config.base_url)
-    return OpenAI(api_key=api_key)
+        return OpenAI(api_key=api_key, base_url=config.base_url, http_client=http_client)
+    return OpenAI(api_key=api_key, http_client=http_client)

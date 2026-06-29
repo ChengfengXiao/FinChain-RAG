@@ -21,6 +21,11 @@ class AskRequest(BaseModel):
     top_k: int = Field(default=5, ge=1, le=10, description="检索返回的 chunk 数量")
     provider: str | None = Field(default=None, description="LLM provider: openai, deepseek, or minimax")
     model: str | None = Field(default=None, description="可选模型名；不填则使用 provider 默认模型")
+    research_mode: str = Field(
+        default="local_rag",
+        description="local_rag, a_stock_online, bottleneck_hunter, or serenity",
+    )
+    online_limit: int = Field(default=2, ge=1, le=6, description="在线模式最多抓取的 A 股标的数量")
 
 
 class AskResponse(BaseModel):
@@ -28,6 +33,11 @@ class AskResponse(BaseModel):
     sources: list[dict[str, Any]]
     provider: str | None = None
     model: str | None = None
+    research_mode: str | None = None
+    run_date: str | None = None
+    targets: list[str] = []
+    operating_snapshots: list[dict[str, Any]] = []
+    graph: dict[str, Any] = {}
 
 
 @lru_cache(maxsize=1)
@@ -48,6 +58,8 @@ def ask(request: AskRequest) -> AskResponse:
             top_k=request.top_k,
             provider=request.provider,
             model=request.model,
+            research_mode=request.research_mode,
+            online_limit=request.online_limit,
         )
         return AskResponse(**result)
     except Exception as exc:

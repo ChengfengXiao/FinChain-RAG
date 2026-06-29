@@ -12,7 +12,7 @@ FinChain-RAG 是一个基于 RAG、向量数据库和 LLM 的 A股产业链研�
 - 结构化公司数据：使用 `companies.jsonl` 管理 A股公司、产业链环节、相关逻辑、评分和风险提示。
 - 产业链 Agent：结合检索资料和公司结构化数据，生成初步投研报告。
 - FastAPI 后端：提供 `/ask` 问答接口。
-- Streamlit 前端：提供可视化问答页面。
+- Streamlit 前端：提供产业/公司搜索、运营快照、ER 关系图谱、AI 报告和数据源审计。
 - 明确引用来源：回答返回 `sources`，便于追溯本地知识库片段。
 
 ## 技术架构图
@@ -145,11 +145,36 @@ MINIMAX_CHAT_MODEL=MiniMax-M3
   "question": "请生成一份AI液冷产业链初步研究报告",
   "provider": "deepseek",
   "model": "deepseek-v4-flash",
+  "research_mode": "bottleneck_hunter",
+  "online_limit": 6,
   "top_k": 5
 }
 ```
 
-## 数据入库方法
+## 研究模式
+
+当前支持 4 种模式：
+
+| research_mode | 数据来源 | 适合场景 |
+| --- | --- | --- |
+| `local_rag` | 本地 markdown + Chroma + `companies.jsonl` | 使用内置液冷资料做可追溯 RAG 报告 |
+| `a_stock_online` | a-stock-data 在线接口 + `companies.jsonl` | 查个股行情、估值、公告、新闻、资金流和概念线索 |
+| `bottleneck_hunter` | a-stock-data 在线接口 + Bottleneck Hunter 框架 | 快速识别产业链卡点和优先验证方向 |
+| `serenity` | a-stock-data 在线接口 + Serenity 供应链研究框架 | 做更完整的产业链层级、公司排序和反方验证 |
+
+在线模式不需要先执行入库，也不依赖本地 markdown。它会自动从问题中识别 6 位股票代码或公司名；如果问题没有明确标的，会从 `companies.jsonl` 里按相关性选取最多 `online_limit` 个 A 股候选作为在线抓取对象。
+
+在线模式会额外返回：
+
+- `targets`：识别出的 A 股代码。
+- `operating_snapshots`：基于腾讯行情、东财基本面/概念/资金流、巨潮公告和东财新闻整理的公司运营快照。
+- `graph`：可视化 ER 关系图谱，节点包括搜索主题、公司、行业、概念、产业链环节、公告、新闻和资金流证据。
+
+图谱节点和公司运营情况只来自已抓取的公开数据字段；数据不足时会在报告和来源审计中标出，不用模型编造。
+
+## 本地 RAG 数据入库方法
+
+只有使用 `local_rag` 模式时才需要执行本节。
 
 项目已内置 5 篇 AI数据中心液冷产业链资料：
 
@@ -186,7 +211,11 @@ POST /ask
 Content-Type: application/json
 
 {
-  "question": "帮我分析AI数据中心液冷产业链，找出A股核心公司"
+  "question": "用 bottleneck hunter 快速看 AI 液冷产业链卡在哪里",
+  "provider": "deepseek",
+  "model": "deepseek-v4-flash",
+  "research_mode": "bottleneck_hunter",
+  "online_limit": 6
 }
 ```
 
@@ -195,14 +224,15 @@ Content-Type: application/json
 ```json
 {
   "answer": "...",
-  "provider": "openai",
-  "model": "gpt-4o-mini",
+  "provider": "deepseek",
+  "model": "deepseek-v4-flash",
+  "research_mode": "bottleneck_hunter",
   "sources": [
     {
-      "source": "03_midstream_systems.md",
-      "chunk_index": 0,
-      "theme": "AI数据中心液冷",
-      "distance": 0.25
+      "source": "eastmoney_stock_info",
+      "code": "002837",
+      "title": "东财个股基本面",
+      "status": "ok"
     }
   ]
 }
@@ -219,10 +249,13 @@ streamlit run src/ui/streamlit_app.py
 页面包含：
 
 - 标题：FinChain-RAG A股产业链研究助手
-- 行业问题输入框
-- 生成分析按钮
-- 分析结果展示区
-- 来源展示区
+- 产业或公司搜索框
+- 研究模式选择：本地 RAG、A股在线、Bottleneck Hunter、Serenity
+- DeepSeek/OpenAI/MiniMax 模型选择，默认 DeepSeek
+- 关系图谱：展示产业/公司/概念/公告/新闻/资金流关系
+- 运营情况：展示价格、估值、市值、资金流、公告和新闻
+- AI研究报告：基于已抓取数据生成初筛结论
+- 数据源审计：展示每个公开数据接口的抓取状态
 
 ## 示例问题
 
